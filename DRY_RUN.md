@@ -139,4 +139,33 @@ consistent and within valid range, which validates the whole
 `GET_SYS_INFO` offset mapping (`protocol.parse_sys_info`), not just the
 one field being tested.
 
-Only step 5 (`start`, with a battery connected) remains.
+**Step 5, completed:** `start --chemistry lipo --cells 3 --current-ma 2200`
+sent to a real Zeee 2200mAh 3S pack. Sent cleanly (no hang - the
+transact()/timeout/lock fix held under a real write, not just reads).
+Panel independently confirmed the exact intended profile: `LP3s 2.2A
+12.45V BAL`. Charge progressed correctly and observably: current
+started at 2.2A (commanded value), cells climbed steadily toward
+4.20V/cell, current then tapered down (2.2A -> 1.53A) as cells
+approached the target - textbook CC-to-CV transition, self-terminating,
+no manual `stop` needed.
+
+**Bug found and fixed along the way:** this was the first real read
+taken during an ACTIVE charge (every previous real read was against an
+idle charger) - `status` showed 5 "cells", with cells 4/5 at a stable
+~9000mV. Cross-checked against the panel, which showed a clean 3S
+pack - confirmed this was a decode artifact, not a real electrical
+fault. Root cause: the charger's balance socket supports more cells
+than the connected pack; the unused pins read this stable phantom
+voltage once real current was flowing (not present when idle, which is
+why no earlier read caught it). `CELL_MIN_MV`'s floor-only check
+(inherited from `b6_poller.py`) let it through. Fixed by adding
+`CELL_MAX_MV = 4400` (LiHV tops out at 4350mV/cell, so this never
+excludes a real reading) - verified fixed live: cells 1-3 correctly
+shown (4.202/4.204/4.196V, 8mV spread), no phantom cells.
+
+**Everything in the original test plan is now verified against real
+hardware.** Follow-up worth doing: port the same `CELL_MAX_MV` fix to
+`ht-infra`'s `b6_poller.py`, since it uses the identical floor-only
+check and could be reporting the same phantom-cell noise into
+production Grafana/alerting whenever a smaller pack is charged on a
+socket built for more cells.
