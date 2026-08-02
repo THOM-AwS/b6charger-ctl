@@ -116,5 +116,16 @@ observed):**
   charger. Also confirms the empty-cells edge case (no battery
   connected) doesn't crash the parser.
 
-Start/stop/set-limits have NOT been sent for real yet - steps 3-5 of
-the plan above (with a battery connected) are still outstanding.
+**Same session, after fixing the transact()/timeout/lock bug above:**
+first real `stop` (no battery, `b6-poller` running) succeeded instantly.
+A second `stop` sent right after **hung indefinitely** - traced to
+split write()/read() file descriptors plus no read timeout, likely
+compounded by `b6-poller`'s own 30s poll grabbing the response. Fixed
+in commit dfd8dd8 (single-fd `transact()`, `select`-based timeout,
+flock). Retested with `b6-poller` stopped: two `stop` calls back-to-back
+both returned `sent STOP` immediately, no hang. Only one audible beep
+(on the first call) - no beep on the redundant second stop, no error
+state either time.
+
+Step 4 (`set-limits`, still no battery) is next, then step 5 (start,
+with a battery connected).
