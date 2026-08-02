@@ -9,6 +9,13 @@
 > configuration could cause a house fire. You have been warned. See
 > [`DISCLAIMER.md`](DISCLAIMER.md) and the **Safety** section below.
 
+Linux Headless Battery Charger Network Controller/exporter
+
+I use this library to control my LiPo battery charger in my garage,
+which is hooked up to a Raspberry Pi Zero W. I maintain a list of the
+different types of batteries I have that I can invoke when I connect
+them, and monitor them with Prometheus/Grafana over the network.
+
 Read/write control for SkyRC B6-family USB HID balance chargers - iMAX
 B6 / B6AC / B6 mini and rebadged clones sold under other brands (Jaycar
 POWERTECH PLUS MB-3633 / JMB-3633 is the one this was built and tested
