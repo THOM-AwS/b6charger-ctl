@@ -220,8 +220,22 @@ and `test_parse_charge_info_does_not_force_zero_voltage_in_normal_state_with_no_
 needed a heuristic, since a genuine idle read has always reported a
 real near-zero voltage on its own, see above).
 
-**Resolved**: decoding the actual `ERROR` code (Enum.hh has a named
-list - `NO_BATTERY`, `BATTERY_FULL`, `CONNECTION_BROKEN_*`, etc.) turns
-`charger_state=2` from a bare number into an actionable message. Next
-time this state is hit for real, `error_name` will say what it
-actually is instead of requiring a guess.
+**Resolved (the fabrication problem), still open (the actual mystery)**:
+decoding the actual `ERROR` code turns `charger_state=2` from a bare
+number into an actionable message - or would, if the code decoded to
+one. Redeployed and re-checked against the real device in the exact
+same state (no battery, state=`ERROR_1`): every numeric field
+correctly zeroed (fix confirmed working), but **the decoded error code
+came back as `0`**, which isn't in `libb6`'s `Enum.hh` at all - every
+defined error code is `0x000B` (11) or higher. Combined with the panel
+showing nothing wrong, this now looks less like "a real error code we
+haven't mapped yet" and more like **this specific charger's firmware
+may not follow `libb6`'s state semantics for value `2` at all** -
+`libb6` was reverse-engineered against genuine SkyRC hardware, and
+this project has already found one other place this rebadge diverges
+from it (the floating-pin cell noise, see above). Genuinely unresolved
+- logged honestly rather than claimed as fixed. The real, confirmed
+improvement either way: the tool now reports "unknown" instead of
+fabricating plausible-looking wrong numbers, which is correct
+regardless of what state `2` actually turns out to mean on this
+hardware.
