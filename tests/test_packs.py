@@ -70,8 +70,8 @@ def test_valid_pack_with_explicit_max_current(tmp_path):
         tmp_path,
         """
         [[pack]]
-        name = "gnb1500"
-        description = "GNB 1500mAh 4S HV"
+        name = "hvpack4s"
+        description = "1500mAh 4S HV"
         chemistry = "lihv"
         cells = 4
         capacity_mah = 1500
@@ -79,7 +79,7 @@ def test_valid_pack_with_explicit_max_current(tmp_path):
         max_current_ma = 1500
         """,
     )
-    pack = load_registry(path).get("gnb1500")
+    pack = load_registry(path).get("hvpack4s")
     assert pack.is_hv is True
     assert pack.max_current_ma == 1500
 
@@ -243,7 +243,7 @@ def test_unknown_pack_name_lists_known_packs(tmp_path):
         tmp_path,
         """
         [[pack]]
-        name = "zeee2200"
+        name = "pack3s"
         description = "d"
         chemistry = "lipo"
         cells = 3
@@ -252,7 +252,7 @@ def test_unknown_pack_name_lists_known_packs(tmp_path):
         """,
     )
     registry = load_registry(path)
-    with pytest.raises(PackConfigError, match="zeee2200"):
+    with pytest.raises(PackConfigError, match="pack3s"):
         registry.get("nonexistent")
 
 

@@ -9,21 +9,23 @@ a `stop` sent seconds after a successful one hung forever. Two design
 issues contributed, both fixed here:
 
 1. write() and read() used to open and close SEPARATE file descriptors.
-   ht-infra's b6_poller.py - the only code that's ever reliably talked
-   to this hardware - always does open -> write -> read -> close on ONE
-   fd. transact() below matches that exactly instead of assuming
-   split write/read is equivalent.
+   A separate, independently-developed read-only poller for this same
+   protocol - the only code confirmed to have reliably talked to this
+   hardware before this project existed - always does open -> write ->
+   read -> close on ONE fd. transact() below matches that exactly
+   instead of assuming split write/read is equivalent.
 2. There was no timeout, so if a command genuinely doesn't produce a
-   response in some device state (or another process, e.g. b6_poller's
-   own 30s poll, grabs the reply first), the read blocked forever. A
-   control tool where `stop` can hang is a real reliability problem -
-   it now raises DeviceTimeout instead.
+   response in some device state (or another process polling the same
+   device grabs the reply first), the read blocked forever. A control
+   tool where `stop` can hang is a real reliability problem - it now
+   raises DeviceTimeout instead.
 
 A per-process-pair flock also serializes transact() calls against
 OTHER b6charger-ctl invocations (e.g. two `b6ctl` commands run close
-together). It does NOT protect against ht-infra's b6_poller.py, which
-is a separate codebase that doesn't know about this lock - stop that
-service before any manual write testing (see DRY_RUN.md).
+together). It does NOT protect against a separate, independent
+exporter process also polling the same device - stop any other
+poller/monitoring process before manual write testing (see
+DRY_RUN.md).
 """
 
 from __future__ import annotations
@@ -109,8 +111,8 @@ class HidRawTransport:
             if not ready:
                 raise DeviceTimeout(
                     f"no response within {timeout_s}s to frame {frame.hex()} - "
-                    "check nothing else (e.g. ht-infra's b6_poller.py) is also "
-                    "talking to the device right now"
+                    "check nothing else (e.g. another exporter or poller process) "
+                    "is also talking to the device right now"
                 )
             return os.read(fd, n)
         finally:
@@ -157,6 +159,10 @@ class FakeChargerTransport:
         self.pack_voltage_mv = sum(self.cells_mv)
         self.capacity_mah = 0
         self.elapsed_s = 0
+        #: Only meaningful (and only encoded) when `state` is ERROR_1/
+        #: ERROR_2 - see protocol.py's parse_charge_info() docstring for
+        #: why nothing past state+error_code is encoded in that case.
+        self.error_code: int | None = None
         self.last_profile: protocol.ChargeProfile | None = None
         self._last_write: bytes = b""
 
@@ -218,11 +224,23 @@ class FakeChargerTransport:
         return self.read(n)
 
     def _encode_charge_info(self) -> bytes:
-        """Encode current state as a GET_CHARGE_INFO response frame."""
+        """Encode current state as a GET_CHARGE_INFO response frame.
+
+        Mirrors real hardware behaviour (per libb6's Device.cc) when
+        `state` is an error state: only the state byte and a 2-byte
+        error code at offset 5-6 are populated, everything after that
+        stays zeroed - there's no verified real layout to simulate.
+        """
         buf = bytearray(64)
         buf[0] = 0x0F
         buf[2] = protocol.Cmd.GET_CHARGE_INFO
         buf[4] = int(self.state)
+
+        if self.state in (protocol.State.ERROR_1, protocol.State.ERROR_2):
+            code = self.error_code if self.error_code is not None else 0xFFFF
+            buf[5], buf[6] = divmod(code, 256)
+            return bytes(buf)
+
         buf[5], buf[6] = divmod(self.capacity_mah, 256)
         buf[7], buf[8] = divmod(self.elapsed_s, 256)
         buf[9], buf[10] = divmod(self.pack_voltage_mv, 256)

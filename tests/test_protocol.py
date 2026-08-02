@@ -13,8 +13,9 @@ from b6charger import protocol
 
 
 def test_get_charge_info_frame_matches_known_good_bytes():
-    # Independently verified against ht-infra's b6_poller.py, which has
-    # sent this exact frame to a real Jaycar POWERTECH PLUS MB-3633.
+    # Independently verified against a separate read-only exporter for
+    # this same protocol, which has sent this exact frame to a real
+    # Jaycar POWERTECH PLUS MB-3633.
     expected = bytes.fromhex("0f035500" "55ffff")
     assert protocol.build_get_charge_info() == expected
 
@@ -165,24 +166,56 @@ def test_parse_charge_info_filters_out_floating_pin_noise_above_max():
     assert info.cells_mv == (4197, 4201, 4192)
 
 
-def test_parse_charge_info_zeroes_voltage_and_current_when_no_real_cells():
+def test_parse_charge_info_zeroes_everything_but_state_and_error_in_error_state():
     # Observed 2026-08-02: with no battery physically connected, the
     # charger's own panel showed nothing wrong, but the raw response
     # still carried a stale non-zero pack voltage/current from before
-    # disconnection. Since no real cells are detected, there's no
-    # battery to report a voltage/current for - zero them rather than
-    # passing through leftover values. See DRY_RUN.md.
+    # disconnection while charger_state read as an error. libb6's
+    # Device.cc confirms it never reads anything past the error code in
+    # this case - so neither do we, rather than guessing. See
+    # DRY_RUN.md.
     from b6charger.transport import FakeChargerTransport
 
     fake = FakeChargerTransport()
-    fake.cells_mv = ()  # nothing plugged in
-    fake.pack_voltage_mv = 12605  # stale leftover reading from before disconnect
+    fake.state = protocol.State.ERROR_1
+    fake.error_code = protocol.Error.BATTERY_FULL
+    # even if the fake's other fields hold stale-looking data, none of
+    # it should be encoded/decoded while in an error state:
+    fake.cells_mv = (4197, 4201, 4192)
+    fake.pack_voltage_mv = 12605
     fake.current_ma = 292
 
     info = protocol.parse_charge_info(fake._encode_charge_info())
+    assert info.state_name == "ERROR_1"
+    assert info.error_code == protocol.Error.BATTERY_FULL
+    assert info.error_name == "BATTERY_FULL"
     assert info.cells_mv == ()
     assert info.voltage_mv == 0
     assert info.current_ma == 0
+    assert info.capacity_mah == 0
+    assert info.time_s == 0
+    assert info.impedance_mohm == 0
+
+
+def test_parse_charge_info_reports_unknown_error_name_for_unmapped_code():
+    from b6charger.transport import FakeChargerTransport
+
+    fake = FakeChargerTransport()
+    fake.state = protocol.State.ERROR_2
+    fake.error_code = 0x1234  # not in the Error enum
+
+    info = protocol.parse_charge_info(fake._encode_charge_info())
+    assert info.error_code == 0x1234
+    assert info.error_name == "UNKNOWN(4660)"
+
+
+def test_parse_charge_info_error_name_is_none_outside_error_states():
+    from b6charger.transport import FakeChargerTransport
+
+    fake = FakeChargerTransport()  # default: COMPLETE, not an error state
+    info = protocol.parse_charge_info(fake._encode_charge_info())
+    assert info.error_code is None
+    assert info.error_name is None
 
 
 def test_parse_charge_info_keeps_voltage_and_current_when_cells_present():
@@ -194,6 +227,23 @@ def test_parse_charge_info_keeps_voltage_and_current_when_cells_present():
     assert info.cells_mv != ()
     assert info.voltage_mv == fake.pack_voltage_mv
     assert info.current_ma == fake.current_ma
+
+
+def test_parse_charge_info_does_not_force_zero_voltage_in_normal_state_with_no_cells():
+    # A genuinely-idle, no-battery-connected read in a NORMAL (non-error)
+    # state has always reported a real, naturally-near-zero voltage on
+    # actual hardware (see DRY_RUN.md's very first hardware read) - no
+    # heuristic override needed or wanted here, only the error-state
+    # branch zeroes anything.
+    from b6charger.transport import FakeChargerTransport
+
+    fake = FakeChargerTransport()
+    fake.cells_mv = ()
+    fake.pack_voltage_mv = 5  # a real near-zero idle reading, not stale garbage
+
+    info = protocol.parse_charge_info(fake._encode_charge_info())
+    assert info.cells_mv == ()
+    assert info.voltage_mv == 5
 
 
 def test_parse_charge_info_rejects_wrong_command():

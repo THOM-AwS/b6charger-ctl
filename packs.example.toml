@@ -20,7 +20,7 @@
 # ----------------
 #   name              Short identifier, no spaces - this is what you type
 #                      as `b6ctl start --pack NAME`. Lowercase letters,
-#                      numbers, underscores recommended (e.g. "zeee2200").
+#                      numbers, underscores recommended (e.g. "pack3s").
 #
 #   description        Free text - whatever helps YOU recognise the pack
 #                      (brand, size, what it's for). Not used for safety

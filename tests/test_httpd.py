@@ -122,6 +122,18 @@ def test_render_metrics_reports_charger_up_1_and_core_fields():
     assert "charger_impedance_milliohms 12" in body
 
 
+def test_render_metrics_includes_error_code_only_in_error_state():
+    from b6charger import protocol
+
+    device = Device(FakeChargerTransport())
+    assert "charger_error_code" not in render_metrics(device)
+
+    device._t.state = protocol.State.ERROR_1
+    device._t.error_code = protocol.Error.NO_BATTERY
+    body = render_metrics(device)
+    assert "charger_error_code 14" in body  # NO_BATTERY = 0x000E = 14
+
+
 def test_render_metrics_reports_charger_up_0_on_failure():
     class BrokenTransport:
         def transact(self, frame, n=64):

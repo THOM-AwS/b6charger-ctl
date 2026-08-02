@@ -122,11 +122,11 @@ class BatteryType(IntEnum):
 class State(IntEnum):
     """Charger state, as reported in GET_CHARGE_INFO's state byte.
 
-    Per libb6's Enum.hh. NOTE: ht-infra's b6_poller.py currently labels
-    state 4 as "idle" - this enum (the only source that's been read
-    directly, rather than inferred from panel behaviour) says 4 is a
-    SECOND error state, not idle. Unverified which is correct on this
-    specific clone's firmware; see README.md's "STATE 4 discrepancy".
+    Per libb6's Enum.hh - the only source read directly here, rather
+    than inferred from panel behaviour. Some other B6-family tooling in
+    the wild labels state 4 as "idle" rather than a second error state;
+    unverified which is correct on which firmware. See README.md's
+    "STATE 4 discrepancy".
     """
 
     CHARGING = 1
@@ -396,7 +396,19 @@ def build_start_charging(profile: ChargeProfile) -> bytes:
 
 @dataclass(frozen=True)
 class ChargeInfo:
-    """Decoded GET_CHARGE_INFO response: live charge telemetry."""
+    """Decoded GET_CHARGE_INFO response: live charge telemetry.
+
+    When `state` is ERROR_1/ERROR_2, only `state` and `error_code` are
+    real - capacity/time/voltage/current/temp/impedance/cells_mv are
+    all zeroed/empty rather than guessed at. libb6's own Device.cc
+    reads the error code and then STOPS - it never reads those other
+    fields during an error response, so there is no authoritative
+    layout for what (if anything) follows the error code. Treating
+    them as unknown is honest; treating them as "the same offsets as a
+    normal response, shifted or not" would be exactly the kind of
+    unfounded guess that produced stale/misleading readings in
+    production (see DRY_RUN.md).
+    """
 
     state: int
     capacity_mah: int
@@ -407,6 +419,7 @@ class ChargeInfo:
     temp_int_c: int
     impedance_mohm: int
     cells_mv: tuple[int, ...] = field(default_factory=tuple)
+    error_code: int | None = None
 
     @property
     def state_name(self) -> str:
@@ -415,6 +428,16 @@ class ChargeInfo:
             return State(self.state).name
         except ValueError:
             return f"UNKNOWN({self.state})"
+
+    @property
+    def error_name(self) -> str | None:
+        """Human-readable Error name, or "UNKNOWN(n)"; None if not in an error state."""
+        if self.error_code is None:
+            return None
+        try:
+            return Error(self.error_code).name
+        except ValueError:
+            return f"UNKNOWN({self.error_code})"
 
 
 CELL_MIN_MV = 2000  # below this a cell slot is unpopulated noise
@@ -432,8 +455,22 @@ def _is_real_cell(mv: int) -> bool:
     return CELL_MIN_MV <= mv <= CELL_MAX_MV
 
 
+_ERROR_STATES = (State.ERROR_1, State.ERROR_2)
+
+
 def parse_charge_info(resp: bytes) -> ChargeInfo:
     """Parse a GET_CHARGE_INFO response frame into a ChargeInfo.
+
+    When the state byte is ERROR_1/ERROR_2, only `state` and
+    `error_code` are decoded - libb6's Device.cc confirms the wire
+    format inserts a 2-byte error code immediately after the state
+    byte in that case, but it never reads anything past that error
+    code (it throws immediately), so there is no verified layout for
+    capacity/time/voltage/current/temp/impedance/cells during an error
+    response. Reporting those as zero/empty is honest about not
+    knowing them; guessing at a shifted continuation of the normal
+    layout would not be (see DRY_RUN.md's "stale voltage/current after
+    disconnect" finding, which is exactly what guessing produced).
 
     Raises ProtocolError if `resp` isn't shaped like a GET_CHARGE_INFO
     response at all (wrong length or command byte).
@@ -444,24 +481,29 @@ def parse_charge_info(resp: bytes) -> ChargeInfo:
     def u16(i: int) -> int:
         return (resp[i] << 8) | resp[i + 1]
 
+    state = resp[4]
+
+    if state in (s.value for s in _ERROR_STATES):
+        return ChargeInfo(
+            state=state,
+            capacity_mah=0,
+            time_s=0,
+            voltage_mv=0,
+            current_ma=0,
+            temp_ext_c=0,
+            temp_int_c=0,
+            impedance_mohm=0,
+            cells_mv=(),
+            error_code=u16(5),
+        )
+
     cells = tuple(u16(17 + 2 * i) for i in range(8) if _is_real_cell(u16(17 + 2 * i)))
-
-    # No real cells detected means no battery is actually connected -
-    # pack voltage/current aren't meaningful readings in that state, and
-    # have been observed to report stale/leftover non-zero values rather
-    # than genuinely-fresh data once a pack is disconnected (see
-    # DRY_RUN.md). Zeroing them here reflects reality ("nothing plugged
-    # in, nothing to report") rather than passing through whatever the
-    # charger happens to still be holding.
-    voltage_mv = u16(9) if cells else 0
-    current_ma = u16(11) if cells else 0
-
     return ChargeInfo(
-        state=resp[4],
+        state=state,
         capacity_mah=u16(5),
         time_s=u16(7),
-        voltage_mv=voltage_mv,
-        current_ma=current_ma,
+        voltage_mv=u16(9),
+        current_ma=u16(11),
         temp_ext_c=resp[13],
         temp_int_c=resp[14],
         impedance_mohm=u16(15),

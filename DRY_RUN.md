@@ -4,9 +4,10 @@
 below was validated against `FakeChargerTransport` (an in-memory
 simulated charger) and hand-traced arithmetic, not a physical device.
 The one thing that *has* been proven against a real Jaycar POWERTECH
-PLUS MB-3633 is the `GET_CHARGE_INFO` read path - via ht-infra's
-`b6_poller.py`, which uses the identical frame this repo's
-`build_get_charge_info()` produces.
+PLUS MB-3633 is the `GET_CHARGE_INFO` read path - via a separate,
+independently-developed read-only exporter for this same protocol,
+which uses the identical frame this repo's `build_get_charge_info()`
+produces.
 
 ## What's verified, and how
 
@@ -68,14 +69,15 @@ frame = 0F 16 05 00 00 03 04 05 DC 03 E8 0C 80 10 68 00 00 00 00 00 00 00 00 DC 
 
 ## Hardware test plan (do this after the current charge finishes)
 
-Run in this order, on `charger-pi`, with `b6_poller.py`'s exporter
-stopped first (it also opens the hidraw device - don't run both at
-once against the same charger):
+Run in this order, on the target host, with any other exporter/poller
+process for this device stopped first (they also open the hidraw
+device - don't run two at once against the same charger):
 
 1. `b6ctl --fake status` - sanity check the CLI itself works (no
    hardware involved).
 2. `b6ctl status` - confirm the real read path still works via this
-   repo's own parser (should match what Grafana already shows).
+   repo's own parser (should match what your monitoring already shows,
+   if any).
 3. **With the charger connected to power but NO battery plugged in**:
    `b6ctl stop --dry-run` then `b6ctl stop` (without `--dry-run`) -
    confirm it doesn't error and the front panel doesn't show anything
@@ -96,9 +98,9 @@ assumption to fix first, before trusting anything else in this repo.
 
 ## Progress log
 
-**2026-08-02, on charger-pi (package copied to `/opt/b6charger-ctl`,
-`b6_poller.py`'s exporter left running throughout - no conflicts
-observed):**
+**2026-08-02, on the reference test host (package deployed alongside a
+separate, independently-developed exporter for this same protocol,
+left running throughout - no conflicts observed):**
 
 - Step 1 (`b6ctl --fake status`) - clean, matches expected fake-charger
   output.
@@ -108,24 +110,25 @@ observed):**
   (`dry_run` short-circuit held).
 - Step 2 (`b6ctl status`, real device, read-only) - **this repo's own
   `parse_charge_info` correctly decoded a real response independently
-  of `b6_poller.py`**: `state=COMPLETE(3)`, `capacity_mah=2019`,
+  of the other exporter**: `state=COMPLETE(3)`, `capacity_mah=2019`,
   `time_s=5616`, `pack_voltage_mv=5`, no cells populated (all below the
   2000mV noise floor). Reads as: the charge that was running earlier
-  this session finished (2019mAh delivered, plausible for the Zeee
-  2200mAh pack) and the battery has since been disconnected from the
-  charger. Also confirms the empty-cells edge case (no battery
-  connected) doesn't crash the parser.
+  this session finished (2019mAh delivered, plausible for a 2200mAh 3S
+  pack) and the battery has since been disconnected from the charger.
+  Also confirms the empty-cells edge case (no battery connected)
+  doesn't crash the parser.
 
 **Same session, after fixing the transact()/timeout/lock bug above:**
-first real `stop` (no battery, `b6-poller` running) succeeded instantly.
-A second `stop` sent right after **hung indefinitely** - traced to
-split write()/read() file descriptors plus no read timeout, likely
-compounded by `b6-poller`'s own 30s poll grabbing the response. Fixed
-in commit dfd8dd8 (single-fd `transact()`, `select`-based timeout,
-flock). Retested with `b6-poller` stopped: two `stop` calls back-to-back
-both returned `sent STOP` immediately, no hang. Only one audible beep
-(on the first call) - no beep on the redundant second stop, no error
-state either time.
+first real `stop` (no battery, the other exporter still running)
+succeeded instantly. A second `stop` sent right after **hung
+indefinitely** - traced to split write()/read() file descriptors plus
+no read timeout, likely compounded by the other exporter's own 30s
+poll grabbing the response. Fixed in commit dfd8dd8 (single-fd
+`transact()`, `select`-based timeout, flock). Retested with the other
+exporter stopped: two `stop` calls back-to-back both returned
+`sent STOP` immediately, no hang. Only one audible beep (on the first
+call) - no beep on the redundant second stop, no error state either
+time.
 
 **Step 4, completed and independently verified:** `set-limits
 --temp-limit 50` sent cleanly (no hang, matching the fix above). Initial
@@ -140,7 +143,7 @@ consistent and within valid range, which validates the whole
 one field being tested.
 
 **Step 5, completed:** `start --chemistry lipo --cells 3 --current-ma 2200`
-sent to a real Zeee 2200mAh 3S pack. Sent cleanly (no hang - the
+sent to a real 2200mAh 3S pack. Sent cleanly (no hang - the
 transact()/timeout/lock fix held under a real write, not just reads).
 Panel independently confirmed the exact intended profile: `LP3s 2.2A
 12.45V BAL`. Charge progressed correctly and observably: current
@@ -158,25 +161,26 @@ fault. Root cause: the charger's balance socket supports more cells
 than the connected pack; the unused pins read this stable phantom
 voltage once real current was flowing (not present when idle, which is
 why no earlier read caught it). `CELL_MIN_MV`'s floor-only check
-(inherited from `b6_poller.py`) let it through. Fixed by adding
-`CELL_MAX_MV = 4400` (LiHV tops out at 4350mV/cell, so this never
-excludes a real reading) - verified fixed live: cells 1-3 correctly
-shown (4.202/4.204/4.196V, 8mV spread), no phantom cells.
+(inherited from the other exporter's original implementation) let it
+through. Fixed by adding `CELL_MAX_MV = 4400` (LiHV tops out at
+4350mV/cell, so this never excludes a real reading) - verified fixed
+live: cells 1-3 correctly shown (4.202/4.204/4.196V, 8mV spread), no
+phantom cells.
 
 **Everything in the original test plan is now verified against real
-hardware.** Follow-up done: the `CELL_MAX_MV` fix was ported to
-`ht-infra`'s `b6_poller.py` too (same floor-only check, same gap),
-merged, and confirmed live in production - see the finding below for
-what that surfaced.
+hardware.** Follow-up done: the `CELL_MAX_MV` fix was ported to the
+other exporter's codebase too (same floor-only check, same gap),
+merged, and confirmed live in production monitoring - see the finding
+below for what that surfaced.
 
 ## Real production finding: stale voltage/current after disconnect (2026-08-02)
 
-With no battery physically connected to the charger, Grafana showed
-`charger_state = 2` (ERROR per both this project's and the original
-exporter's state mapping) alongside a non-zero, unmoving pack voltage
-(~12.6V) and current (~292mA) - looking like a fault. Checked the
-charger's own front panel directly: **it showed nothing wrong, no
-error code, looked completely normal.**
+With no battery physically connected to the charger, production
+monitoring showed `charger_state = 2` (ERROR per both this project's
+and the other exporter's state mapping) alongside a non-zero, unmoving
+pack voltage (~12.6V) and current (~292mA) - looking like a fault.
+Checked the charger's own front panel directly: **it showed nothing
+wrong, no error code, looked completely normal.**
 
 That mismatch (exporter says ERROR, panel says fine) plus the
 non-zero voltage while genuinely disconnected (a real "no battery"
@@ -185,20 +189,39 @@ points at the charger's own response still carrying stale/leftover
 values from before disconnection, rather than fresh zeros - not
 confirmed to be a byte-offset parsing bug (libb6's `Device.cc` inserts
 a 2-byte error code after the state byte during `ERROR_1`/`ERROR_2`
-that neither this project nor the original exporter has ever decoded,
-so that remains a real, separate, still-open gap - just not
-confirmed as the cause here).
+that neither this project nor the other exporter has ever decoded, so
+that remains a real, separate, still-open gap - just not confirmed as
+the cause here).
 
 **Fix applied regardless of root cause**: `parse_charge_info()` now
 zeroes `voltage_mv`/`current_ma` whenever no real cells are detected
 (`cells_mv` empty) - no real cells means no battery is actually
 connected, so a pack voltage/current reading isn't meaningful
-regardless of what raw bytes the charger returns. Verified via
-`test_parse_charge_info_zeroes_voltage_and_current_when_no_real_cells`.
+regardless of what raw bytes the charger returns.
 
-**Still open**: decoding the actual `ERROR` code (Enum.hh has a named
-list - `NO_BATTERY`, `BATTERY_FULL`, `CONNECTION_BROKEN_*`, etc.) would
-turn `charger_state=2` from a bare number into an actionable message,
-and would let us stop guessing whether error-state responses need a
-2-byte offset correction. Worth doing before trusting any other field
-during an active error state.
+**Superseded by a more precise fix, same day**: the cells-based
+zeroing above was a reasonable first reaction but the wrong mechanism
+- it couldn't have caught this case reliably, since a stale-but-still-
+"real-looking" cell reading (within the normal 2000-4400mV range)
+would pass the cell-presence check without being fresh data.
+`parse_charge_info()` now branches on `state` instead: when it's
+`ERROR_1`/`ERROR_2`, only `state` and a newly-decoded `error_code` are
+returned - `libb6`'s `Device.cc` confirms it never reads
+capacity/voltage/current/temp/impedance/cells during an error
+response (it throws immediately after the error code), so there's no
+verified layout to guess at for those fields, and none is guessed at
+here either. `ChargeInfo` gained `error_code`/`error_name` properties,
+surfaced through `b6ctl status`, the HTTP `/status` endpoint, and a new
+`charger_error_code` metric (only emitted while actually in an error
+state). Verified via
+`test_parse_charge_info_zeroes_everything_but_state_and_error_in_error_state`
+and `test_parse_charge_info_does_not_force_zero_voltage_in_normal_state_with_no_cells`
+(confirming the normal-state, no-battery case is untouched - it never
+needed a heuristic, since a genuine idle read has always reported a
+real near-zero voltage on its own, see above).
+
+**Resolved**: decoding the actual `ERROR` code (Enum.hh has a named
+list - `NO_BATTERY`, `BATTERY_FULL`, `CONNECTION_BROKEN_*`, etc.) turns
+`charger_state=2` from a bare number into an actionable message. Next
+time this state is hit for real, `error_name` will say what it
+actually is instead of requiring a guess.

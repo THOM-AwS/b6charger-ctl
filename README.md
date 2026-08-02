@@ -96,8 +96,8 @@ not guessing or measuring anything:
 
 ```toml
 [[pack]]
-name = "zeee2200"              # what you'll type as --pack zeee2200
-description = "Zeee 2200mAh 3S, standard LiPo"
+name = "pack3s"              # what you'll type as --pack pack3s
+description = "2200mAh 3S, standard LiPo"
 chemistry = "lipo"             # "lipo" (4.20V/cell) or "lihv" (4.35V/cell)
 cells = 3                      # the "S" number printed on the pack
 capacity_mah = 2200             # the mAh rating printed on the pack
@@ -121,7 +121,7 @@ guidance for chemistry, is in the comments inside
 **3. Charge by name:**
 
 ```bash
-b6ctl start --pack zeee2200
+b6ctl start --pack pack3s
 ```
 
 This is the recommended way to start a charge, because it comes with a
@@ -202,7 +202,7 @@ rather than trusting that it didn't error. Read-only.
 
 ```bash
 b6ctl packs list
-b6ctl packs show zeee2200
+b6ctl packs show pack3s
 ```
 
 `packs show` takes one positional argument: the pack `name` from
@@ -216,8 +216,8 @@ See [Configure your batteries](#configure-your-batteries) for the full
 **Recommended**, using a configured pack:
 
 ```bash
-b6ctl start --pack zeee2200
-b6ctl start --pack zeee2200 --current-ma 1500   # override the default current
+b6ctl start --pack pack3s
+b6ctl start --pack pack3s --current-ma 1500   # override the default current
 ```
 
 **Manual**, without a registry entry:
@@ -389,6 +389,19 @@ version might:
   charger state `4` as a second error state (`ERROR_2`); some other
   B6-family tooling labels it "idle". Unverified which is correct on
   which firmware. See the `State` enum's docstring in `protocol.py`.
+- **Error-state responses aren't fully specified, and this project
+  doesn't guess at them**: when `state` is `ERROR_1`/`ERROR_2`,
+  `libb6`'s reference implementation reads a 2-byte error code right
+  after the state byte and stops - it never reads
+  capacity/voltage/current/temp/impedance/cells in that case, so
+  there's no verified layout for them to fall back on.
+  `parse_charge_info()` matches that exactly: only `state` and the new
+  `error_code`/`error_name` are populated during an error state,
+  everything else is zeroed rather than assumed. An earlier version of
+  this project guessed that those fields still applied and reported
+  stale, misleading values in production - see
+  [`DRY_RUN.md`](DRY_RUN.md) for the full story and why "zero when
+  unknown" is the honest choice.
 
 ## Safety
 

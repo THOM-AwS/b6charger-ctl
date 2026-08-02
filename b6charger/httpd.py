@@ -152,6 +152,15 @@ def render_metrics(device: Device) -> str:
         f"# HELP charger_state Charger state ({states_help}).",
         "# TYPE charger_state gauge",
         f"charger_state {info.state}",
+    ]
+    if info.error_code is not None:
+        lines += [
+            f"# HELP charger_error_code Error code while state is ERROR_1/ERROR_2 "
+            f"({info.error_name}). Only present in an error state.",
+            "# TYPE charger_error_code gauge",
+            f"charger_error_code {info.error_code}",
+        ]
+    lines += [
         "# HELP charger_capacity_mah Capacity delivered so far this charge, in mAh.",
         "# TYPE charger_capacity_mah gauge",
         f"charger_capacity_mah {info.capacity_mah}",
@@ -241,6 +250,8 @@ def make_handler(
                 {
                     "state": info.state,
                     "state_name": info.state_name,
+                    "error_code": info.error_code,
+                    "error_name": info.error_name,
                     "voltage_mv": info.voltage_mv,
                     "current_ma": info.current_ma,
                     "capacity_mah": info.capacity_mah,

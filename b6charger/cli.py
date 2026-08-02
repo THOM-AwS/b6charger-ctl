@@ -72,6 +72,8 @@ def _cmd_status(args: argparse.Namespace) -> None:
                 {
                     "state": info.state,
                     "state_name": info.state_name,
+                    "error_code": info.error_code,
+                    "error_name": info.error_name,
                     "capacity_mah": info.capacity_mah,
                     "time_s": info.time_s,
                     "voltage_mv": info.voltage_mv,
@@ -85,6 +87,8 @@ def _cmd_status(args: argparse.Namespace) -> None:
         )
         return
     print(f"state:      {info.state_name} ({info.state})")
+    if info.error_name is not None:
+        print(f"error:      {info.error_name} ({info.error_code})")
     print(f"pack:       {info.voltage_mv / 1000:.3f}V")
     print(f"current:    {info.current_ma / 1000:.3f}A")
     print(f"capacity:   {info.capacity_mah}mAh in {info.time_s}s")
