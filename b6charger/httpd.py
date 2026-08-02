@@ -6,8 +6,9 @@ process) rather than folded in - a monitoring endpoint and a control
 endpoint have very different blast radii if either has a bug.
 
 Binds to 127.0.0.1 by default. Widening that is a real decision (this
-process can command a LiPo charger over the network) - pass --host
-explicitly if you actually want that, don't default to it.
+process can command a LiPo charger over the network) - pass --host/
+--port or --listen explicitly if you actually want that, don't default
+to it.
 
 Every write is logged before being sent, same as the CLI - this is the
 audit trail for "what did this thing tell the charger to do and when".
@@ -31,7 +32,43 @@ from b6charger.transport import FakeChargerTransport, HidRawTransport
 
 log = logging.getLogger("b6charger.httpd")
 
+DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 9111
+
+
+def parse_listen_address(value: str) -> tuple[str, int]:
+    """Parse a HOST:PORT socket address, as used by --listen.
+
+    Accepts plain `HOST:PORT` (e.g. "0.0.0.0:9111") or bracketed IPv6
+    (e.g. "[::1]:9111" - required for IPv6 since the address itself
+    contains colons). Raises argparse.ArgumentTypeError with a clear
+    message on anything that doesn't parse, so argparse reports it as
+    a normal usage error rather than a traceback.
+    """
+    if value.startswith("["):
+        host, sep, port_str = value[1:].partition("]:")
+    else:
+        host, sep, port_str = value.rpartition(":")
+
+    if not sep:
+        raise argparse.ArgumentTypeError(
+            f"invalid --listen value {value!r} - expected HOST:PORT "
+            "(e.g. 0.0.0.0:9111) or [HOST]:PORT for IPv6 (e.g. [::1]:9111)"
+        )
+
+    try:
+        port = int(port_str)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"invalid --listen value {value!r} - {port_str!r} is not a valid port number"
+        ) from None
+
+    if not 1 <= port <= 65535:
+        raise argparse.ArgumentTypeError(
+            f"invalid --listen value {value!r} - port {port} out of range 1-65535"
+        )
+
+    return host, port
 
 
 def make_handler(device: Device) -> type[BaseHTTPRequestHandler]:
@@ -134,23 +171,61 @@ def make_handler(device: Device) -> type[BaseHTTPRequestHandler]:
     return Handler
 
 
-def main(argv: list[str] | None = None) -> None:
-    """Entry point for the `b6httpd` console script: parse args and serve forever."""
+def build_parser() -> argparse.ArgumentParser:
+    """Construct the `b6httpd` argument parser."""
     p = argparse.ArgumentParser(prog="b6httpd")
-    p.add_argument("--host", default="127.0.0.1")
-    p.add_argument("--port", type=int, default=DEFAULT_PORT)
+    p.add_argument("--host", default=None, help=f"interface to bind (default: {DEFAULT_HOST})")
+    p.add_argument(
+        "--port", type=int, default=None, help=f"port to bind (default: {DEFAULT_PORT})"
+    )
+    p.add_argument(
+        "--listen",
+        type=parse_listen_address,
+        default=None,
+        metavar="HOST:PORT",
+        help=(
+            "combined interface:port socket, e.g. --listen 0.0.0.0:9111 or "
+            "--listen [::1]:9111 for IPv6. Mutually exclusive with --host/--port"
+        ),
+    )
     p.add_argument("--device", help="explicit /dev/hidrawN (default: auto-discover)")
     p.add_argument("--fake", action="store_true")
     p.add_argument("--dry-run", action="store_true", help="log writes, send nothing")
-    args = p.parse_args(argv)
+    return p
+
+
+def resolve_host_port(args: argparse.Namespace) -> tuple[str, int]:
+    """Work out the (host, port) to bind from parsed args.
+
+    --listen and --host/--port are mutually exclusive - exits with a
+    usage error (via ArgumentParser.error, so it looks like any other
+    argparse mistake) if both forms were given. Defaults to
+    127.0.0.1:9111 (DEFAULT_HOST/DEFAULT_PORT) if neither is given.
+    """
+    if args.listen is not None and (args.host is not None or args.port is not None):
+        build_parser().error(
+            "--listen cannot be combined with --host/--port - use one or the other"
+        )
+    if args.listen is not None:
+        return args.listen
+    return (
+        args.host if args.host is not None else DEFAULT_HOST,
+        args.port if args.port is not None else DEFAULT_PORT,
+    )
+
+
+def main(argv: list[str] | None = None) -> None:
+    """Entry point for the `b6httpd` console script: parse args and serve forever."""
+    args = build_parser().parse_args(argv)
+    host, port = resolve_host_port(args)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 
     transport = FakeChargerTransport() if args.fake else HidRawTransport(args.device)
     device = Device(transport, dry_run=args.dry_run)
 
-    server = ThreadingHTTPServer((args.host, args.port), make_handler(device))
-    log.info("listening on %s:%s (dry_run=%s)", args.host, args.port, args.dry_run)
+    server = ThreadingHTTPServer((host, port), make_handler(device))
+    log.info("listening on %s:%s (dry_run=%s)", host, port, args.dry_run)
     server.serve_forever()
 
 
