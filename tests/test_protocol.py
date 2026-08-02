@@ -157,6 +157,22 @@ def test_parse_charge_info_round_trips_through_fake_transport_encoding():
     assert info.current_ma == 1500
 
 
+def test_parse_charge_info_filters_out_floating_pin_noise_above_max():
+    # Real values observed 2026-08-02 on a 3S pack mid-charge: cells 4/5
+    # read a stable ~9000mV (floating balance-socket pins on a charger
+    # whose socket supports more cells than the connected pack), which
+    # a floor-only filter let through as phantom cells. See DRY_RUN.md.
+    from b6charger.transport import FakeChargerTransport
+
+    fake = FakeChargerTransport()
+    fake.cells_mv = (4197, 4201, 4192, 9217, 8960)
+    fake.pack_voltage_mv = 4197 + 4201 + 4192  # real pack voltage, 3 real cells
+    fake.state = protocol.State.CHARGING
+
+    info = protocol.parse_charge_info(fake._encode_charge_info())
+    assert info.cells_mv == (4197, 4201, 4192)
+
+
 def test_parse_charge_info_rejects_wrong_command():
     bad = bytes([0x0F, 0x03, 0xFE, 0x00]) + bytes(60)
     with pytest.raises(protocol.ProtocolError):

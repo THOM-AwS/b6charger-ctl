@@ -360,6 +360,17 @@ class ChargeInfo:
 
 
 CELL_MIN_MV = 2000  # below this a cell slot is unpopulated noise
+CELL_MAX_MV = 4400  # above this it's noise on a floating balance pin, not a
+# real cell - LiHV tops out at 4350mV/cell, so 4400 leaves headroom without
+# ever excluding a genuine reading. Confirmed necessary 2026-08-02: with a
+# 3S pack on a charger whose balance socket supports more cells, the unused
+# pins read a STABLE ~9000mV once real charge current was flowing (not
+# noticed on any earlier idle-charger read) - a floor-only check let it
+# through as a phantom 4th/5th "cell". See DRY_RUN.md for the live trace.
+
+
+def _is_real_cell(mv: int) -> bool:
+    return CELL_MIN_MV <= mv <= CELL_MAX_MV
 
 
 def parse_charge_info(resp: bytes) -> ChargeInfo:
@@ -369,9 +380,7 @@ def parse_charge_info(resp: bytes) -> ChargeInfo:
     def u16(i: int) -> int:
         return (resp[i] << 8) | resp[i + 1]
 
-    cells = tuple(
-        u16(17 + 2 * i) for i in range(8) if u16(17 + 2 * i) >= CELL_MIN_MV
-    )
+    cells = tuple(u16(17 + 2 * i) for i in range(8) if _is_real_cell(u16(17 + 2 * i)))
     return ChargeInfo(
         state=resp[4],
         capacity_mah=u16(5),
@@ -416,7 +425,7 @@ def parse_sys_info(resp: bytes) -> SysInfo:
     # cycleTime(u8) timeLimitOn(u8) timeLimit(u16) capLimitOn(u8)
     # capLimit(u16) keyBuzzer(u8) systemBuzzer(u8) lowDCLimit(u16)
     # <skip 2> tempLimit(u8) voltage(u16) cells[8](u16 each)
-    cells = tuple(u16(20 + 2 * i) for i in range(8) if u16(20 + 2 * i) >= CELL_MIN_MV)
+    cells = tuple(u16(20 + 2 * i) for i in range(8) if _is_real_cell(u16(20 + 2 * i)))
     return SysInfo(
         cycle_time=resp[4],
         time_limit_on=bool(resp[5]),
