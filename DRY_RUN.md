@@ -301,3 +301,54 @@ which would be a real functional problem, not just an edge case.
 **Untested - needs a real hardware check**: connect a battery, read
 `b6ctl status` *before* sending `start`, and see what `state` comes
 back.
+
+## Correction, same day: temp_int_c is NOT confirmed live after all
+
+The "confirmed live" claim above didn't survive a follow-up test. The
+charger was physically power-cycled (unplugged/replugged) later the
+same day. Immediately after, in the identical state (`state=2`, no
+battery), a fresh raw capture read:
+
+```
+0f2255000200000200000000...00000001005800...  (see full hex in git history)
+
+state=2  error_code=0
+capacity=0  time=0  voltage=0  current=0
+temp_ext=0  temp_int=0
+impedance=0
+cells: (none)
+```
+
+Every field is genuinely zero this time - not the stale-but-plausible
+values from before the restart, including `temp_int_c`, which now
+reads `0` instead of the `24` captured pre-restart. Re-polled several
+times over the following minutes; it stayed at `0`.
+
+This contradicts the "independent live sensor" theory the earlier fix
+was built on. If `temp_int_c` were a continuously-sampled hardware
+reading unrelated to charge state, a charger sitting powered-on in a
+garage should read something close to room temperature, not `0`. The
+much more consistent explanation: `temp_int_c` is populated by
+firmware **per charge session**, the same as voltage/current/cells -
+the pre-restart `24` was likely also a frozen leftover from the last
+real charge (when the charger genuinely was at ~24C), not a live
+value at all. A power-cycle clears it back to `0` along with
+everything else, and it presumably stays `0` until the next charge
+actually runs.
+
+**Not reverted**: `parse_charge_info()` still decodes `temp_ext_c`/
+`temp_int_c` in error states. Unlike the fields the original fix
+correctly left zeroed, nothing in this codebase uses temperature as a
+safety input (`check_cell_count` gates on `cells_mv`, not temp) - so
+a stale-or-zero temp reading is a monitoring-accuracy question, not a
+fire-risk one, and decoding it is still strictly more honest than
+unconditionally forcing `0` regardless of what the charger actually
+holds. What changed is the *claim*: this is no longer documented as a
+confirmed-live sensor, just as "whatever the charger currently
+reports for this field, which may be stale or unpopulated." See
+`ChargeInfo`'s docstring in `protocol.py` for the corrected language.
+
+**Still open**: whether `temp_int_c` ever updates mid-charge (i.e.
+whether it becomes genuinely live once a charge is actually running)
+is untested - the restart test only proves it's zero at boot and was
+non-zero after a past charge, not when in between it changes.

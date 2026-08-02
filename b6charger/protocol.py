@@ -398,24 +398,30 @@ def build_start_charging(profile: ChargeProfile) -> bytes:
 class ChargeInfo:
     """Decoded GET_CHARGE_INFO response: live charge telemetry.
 
-    When `state` is ERROR_1/ERROR_2, only `state`, `error_code`,
-    `temp_ext_c`, and `temp_int_c` are real - capacity/time/voltage/
-    current/impedance/cells_mv are all zeroed/empty rather than guessed
-    at. libb6's own Device.cc reads the error code and then STOPS - it
-    never reads any further fields during an error response, so there
-    is no authoritative layout to point at here. But temp_ext_c/
-    temp_int_c are charger-hardware sensor readings (case/probe
-    thermistors feeding the charger's own overheat protection), not
-    pack-derived telemetry - they don't depend on a battery being
-    connected, unlike voltage/current/capacity/cells_mv, which DO
-    reflect the (possibly stale) last charge session and are exactly
-    the kind of unfounded guess that produced stale/misleading
-    readings in production before (see DRY_RUN.md). Confirmed live
-    2026-08-02: a no-battery ERROR_1 read decoded temp_int_c=24 (a
-    plausible room temperature) at the same offset the normal-state
-    parser already uses, while voltage/current/cells in that same read
-    were frozen leftovers from the prior charge - exactly the split
-    this class encodes.
+    When `state` is ERROR_1/ERROR_2, only `state` and `error_code` are
+    reliably real - capacity/time/voltage/current/impedance/cells_mv
+    are all zeroed/empty rather than guessed at. libb6's own Device.cc
+    reads the error code and then STOPS - it never reads any further
+    fields during an error response, so there is no authoritative
+    layout to point at here.
+
+    `temp_ext_c`/`temp_int_c` ARE decoded even in this state, at the
+    same offsets the normal-state parser uses, but the confidence level
+    here is lower than the module previously claimed: a first no-battery
+    capture (2026-08-02) decoded temp_int_c=24 (plausible) while
+    voltage/current/cells in that same read were confirmed-stale
+    leftovers from the prior charge - read at the time as evidence
+    temp was a live, pack-independent sensor. A physical power-cycle
+    the same day disproved that: post-restart, in the identical state,
+    temp_int_c read 0 - alongside every pack field ALSO freshly zeroed
+    instead of stale. That pattern is much more consistent with temp
+    being populated by firmware only during/after an active charge
+    session (frozen like the other fields, just cleared by the same
+    restart) than with it being an independently-live sensor. Decoded
+    anyway because, unlike voltage/current/cells, nothing in this
+    codebase treats temp as a safety input - a stale-or-zero reading
+    here is a monitoring-accuracy question, not a fire-risk one. See
+    DRY_RUN.md for the full timeline, including this correction.
     """
 
     state: int
@@ -481,12 +487,15 @@ def parse_charge_info(resp: bytes) -> ChargeInfo:
     shifted continuation of the normal layout would reintroduce
     exactly that bug).
 
-    `temp_ext_c`/`temp_int_c` ARE decoded even in an error state,
-    unlike the fields above: they're charger-hardware sensor readings
-    (case/probe thermistors), not pack telemetry, so they don't depend
-    on a battery being connected, and the offsets are the same ones
-    the normal-state path already trusts. Confirmed live 2026-08-02
-    against real no-battery ERROR_1 hardware - see DRY_RUN.md.
+    `temp_ext_c`/`temp_int_c` ARE decoded even in an error state, at
+    the same offsets the normal-state path already trusts - but decode
+    here does not mean "guaranteed live": a same-day physical restart
+    test showed this field reads 0 right after power-on and only a
+    plausible non-zero value once the charger has actually run a
+    charge, suggesting it's populated per-session like the fields
+    above rather than continuously sampled while idle. Decoded anyway
+    since nothing here treats temp as a safety input, unlike
+    voltage/current/cells_mv. See DRY_RUN.md for the full timeline.
 
     Raises ProtocolError if `resp` isn't shaped like a GET_CHARGE_INFO
     response at all (wrong length or command byte).
