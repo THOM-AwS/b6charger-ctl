@@ -60,3 +60,28 @@ def test_lock_is_released_so_sequential_transacts_both_succeed(tmp_path, monkeyp
     )
     transport.transact(b"\x0f\x03\x55\x00\x55\xff\xff")
     transport.transact(b"\x0f\x03\x55\x00\x55\xff\xff")  # would hang if the lock leaked
+
+
+def test_transact_recovers_from_a_stale_unwritable_lock_file(tmp_path, monkeypatch):
+    # Confirmed in production 2026-08-02: a lock file created by one user
+    # (mode masked by their umask down to 0664) blocked a later process
+    # running as a different user (root) with PermissionError on open.
+    # Since the lock file holds no meaningful state, recovering by
+    # removing and recreating it is safe.
+    device_path = tmp_path / "hidraw_fake"
+    device_path.touch()
+    monkeypatch.setattr(
+        "b6charger.transport.select.select", lambda rlist, w, x, timeout: (rlist, [], [])
+    )
+
+    lock_path = tmp_path / "lock"
+    lock_path.touch()
+    lock_path.chmod(0o000)  # simulates "some other user's file, unwritable to us"
+
+    transport = HidRawTransport(
+        device_path=str(device_path),
+        timeout_s=1.0,
+        lock_path=str(lock_path),
+    )
+    # doesn't raise - recovers by unlinking and recreating the lock file.
+    transport.transact(b"\x0f\x03\x55\x00\x55\xff\xff")

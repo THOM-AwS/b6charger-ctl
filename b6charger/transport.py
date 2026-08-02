@@ -118,6 +118,30 @@ class HidRawTransport:
         finally:
             os.close(fd)
 
+    def _open_lock_fd(self) -> int:
+        """Open (creating if needed) the lock file.
+
+        Tolerates a stale owner/permission mismatch from a previous run
+        as a different user. O_NOFOLLOW refuses to open through a
+        pre-existing symlink at this
+        path rather than silently following it - the mitigation for the
+        /tmp shared-path risk noted on DEFAULT_LOCK_PATH above. Separately:
+        the requested 0o666 creation mode is masked by whichever process's
+        umask created the file FIRST, which can leave it unwritable by a
+        later process running as a different user (confirmed in
+        production: a user-owned lock file at 0664 from an earlier `b6ctl`
+        run blocked the httpd service, which runs as root, with
+        PermissionError). Since this file holds no meaningful state - it's
+        purely an empty advisory lock - a permission error on open is safe
+        to resolve by removing and recreating it, once.
+        """
+        flags = os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW
+        try:
+            return os.open(self._lock_path, flags, 0o666)
+        except PermissionError:
+            os.unlink(self._lock_path)
+            return os.open(self._lock_path, flags, 0o666)
+
     def transact(self, frame: bytes, n: int = 64) -> bytes:
         """Send `frame` and return the response, serialized against other b6ctl calls.
 
@@ -126,10 +150,7 @@ class HidRawTransport:
         sequences on the same device (see the module docstring for why
         that matters).
         """
-        # O_NOFOLLOW refuses to open through a pre-existing symlink at this
-        # path rather than silently following it - the actual mitigation
-        # for the /tmp shared-path risk noted on DEFAULT_LOCK_PATH above.
-        lock_fd = os.open(self._lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o666)
+        lock_fd = self._open_lock_fd()
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_EX)
             return self._raw_transact(self._path, frame, self._timeout_s, n)
