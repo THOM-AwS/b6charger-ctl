@@ -93,3 +93,28 @@ once against the same charger):
 Update this file with the outcome once run - if anything above
 disagrees with what actually happens on hardware, that's the protocol
 assumption to fix first, before trusting anything else in this repo.
+
+## Progress log
+
+**2026-08-02, on charger-pi (package copied to `/opt/b6charger-ctl`,
+`b6_poller.py`'s exporter left running throughout - no conflicts
+observed):**
+
+- Step 1 (`b6ctl --fake status`) - clean, matches expected fake-charger
+  output.
+- Step 3-equivalent dry-run (`b6ctl -v stop --dry-run`) - printed
+  `0f03fe00feffff`, exactly matching `test_stop_charging_frame_matches_
+  known_good_bytes`'s hardcoded fixture. Confirmed nothing was sent
+  (`dry_run` short-circuit held).
+- Step 2 (`b6ctl status`, real device, read-only) - **this repo's own
+  `parse_charge_info` correctly decoded a real response independently
+  of `b6_poller.py`**: `state=COMPLETE(3)`, `capacity_mah=2019`,
+  `time_s=5616`, `pack_voltage_mv=5`, no cells populated (all below the
+  2000mV noise floor). Reads as: the charge that was running earlier
+  this session finished (2019mAh delivered, plausible for the Zeee
+  2200mAh pack) and the battery has since been disconnected from the
+  charger. Also confirms the empty-cells edge case (no battery
+  connected) doesn't crash the parser.
+
+Start/stop/set-limits have NOT been sent for real yet - steps 3-5 of
+the plan above (with a battery connected) are still outstanding.
