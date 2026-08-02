@@ -398,16 +398,24 @@ def build_start_charging(profile: ChargeProfile) -> bytes:
 class ChargeInfo:
     """Decoded GET_CHARGE_INFO response: live charge telemetry.
 
-    When `state` is ERROR_1/ERROR_2, only `state` and `error_code` are
-    real - capacity/time/voltage/current/temp/impedance/cells_mv are
-    all zeroed/empty rather than guessed at. libb6's own Device.cc
-    reads the error code and then STOPS - it never reads those other
-    fields during an error response, so there is no authoritative
-    layout for what (if anything) follows the error code. Treating
-    them as unknown is honest; treating them as "the same offsets as a
-    normal response, shifted or not" would be exactly the kind of
-    unfounded guess that produced stale/misleading readings in
-    production (see DRY_RUN.md).
+    When `state` is ERROR_1/ERROR_2, only `state`, `error_code`,
+    `temp_ext_c`, and `temp_int_c` are real - capacity/time/voltage/
+    current/impedance/cells_mv are all zeroed/empty rather than guessed
+    at. libb6's own Device.cc reads the error code and then STOPS - it
+    never reads any further fields during an error response, so there
+    is no authoritative layout to point at here. But temp_ext_c/
+    temp_int_c are charger-hardware sensor readings (case/probe
+    thermistors feeding the charger's own overheat protection), not
+    pack-derived telemetry - they don't depend on a battery being
+    connected, unlike voltage/current/capacity/cells_mv, which DO
+    reflect the (possibly stale) last charge session and are exactly
+    the kind of unfounded guess that produced stale/misleading
+    readings in production before (see DRY_RUN.md). Confirmed live
+    2026-08-02: a no-battery ERROR_1 read decoded temp_int_c=24 (a
+    plausible room temperature) at the same offset the normal-state
+    parser already uses, while voltage/current/cells in that same read
+    were frozen leftovers from the prior charge - exactly the split
+    this class encodes.
     """
 
     state: int
@@ -461,16 +469,24 @@ _ERROR_STATES = (State.ERROR_1, State.ERROR_2)
 def parse_charge_info(resp: bytes) -> ChargeInfo:
     """Parse a GET_CHARGE_INFO response frame into a ChargeInfo.
 
-    When the state byte is ERROR_1/ERROR_2, only `state` and
-    `error_code` are decoded - libb6's Device.cc confirms the wire
-    format inserts a 2-byte error code immediately after the state
-    byte in that case, but it never reads anything past that error
-    code (it throws immediately), so there is no verified layout for
-    capacity/time/voltage/current/temp/impedance/cells during an error
-    response. Reporting those as zero/empty is honest about not
-    knowing them; guessing at a shifted continuation of the normal
-    layout would not be (see DRY_RUN.md's "stale voltage/current after
-    disconnect" finding, which is exactly what guessing produced).
+    When the state byte is ERROR_1/ERROR_2, `capacity`/`time`/
+    `voltage`/`current`/`impedance`/`cells_mv` are zeroed/empty rather
+    than decoded - libb6's Device.cc confirms the wire format inserts a
+    2-byte error code immediately after the state byte in that case,
+    but it never reads anything past that error code (it throws
+    immediately), so there is no verified layout for those
+    pack-derived fields during an error response, and reporting them
+    as zero/empty is honest about not knowing them (see DRY_RUN.md's
+    "stale voltage/current after disconnect" finding - guessing at a
+    shifted continuation of the normal layout would reintroduce
+    exactly that bug).
+
+    `temp_ext_c`/`temp_int_c` ARE decoded even in an error state,
+    unlike the fields above: they're charger-hardware sensor readings
+    (case/probe thermistors), not pack telemetry, so they don't depend
+    on a battery being connected, and the offsets are the same ones
+    the normal-state path already trusts. Confirmed live 2026-08-02
+    against real no-battery ERROR_1 hardware - see DRY_RUN.md.
 
     Raises ProtocolError if `resp` isn't shaped like a GET_CHARGE_INFO
     response at all (wrong length or command byte).
@@ -490,8 +506,8 @@ def parse_charge_info(resp: bytes) -> ChargeInfo:
             time_s=0,
             voltage_mv=0,
             current_ma=0,
-            temp_ext_c=0,
-            temp_int_c=0,
+            temp_ext_c=resp[13],
+            temp_int_c=resp[14],
             impedance_mohm=0,
             cells_mv=(),
             error_code=u16(5),

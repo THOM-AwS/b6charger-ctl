@@ -239,3 +239,65 @@ improvement either way: the tool now reports "unknown" instead of
 fabricating plausible-looking wrong numbers, which is correct
 regardless of what state `2` actually turns out to mean on this
 hardware.
+
+## Real production finding: internal temp wrongly zeroed in error state (2026-08-02)
+
+Production monitoring showed `charger_temp_internal_celsius = 0`
+whenever `charger_state = 2` (no battery connected) - reported as
+wrong, correctly: the charger's internal case temperature is a
+hardware sensor reading, not something that should depend on whether
+a battery happens to be plugged in.
+
+Captured the raw `GET_CHARGE_INFO` response directly against the real
+charger, live, in this exact state (`state=2`, `error_code=0`,
+no battery physically connected):
+
+```
+0f22550002000004ce313d01240018000010731066107101800153013f240123000100acffffecffff0000...
+
+state=2  error_code=0 (unmapped, same open mystery as above)
+capacity=0  time=1230s  voltage=12605mV  current=292mA
+temp_ext=0  temp_int=24
+impedance=0
+cells: 4211, 4198, 4209, [noise], [noise], [noise], [floating-pin], [floating-pin]
+```
+
+Decoded at the same offsets the normal-state parser already trusts,
+`temp_int_c=24` is a plausible room-temperature reading - strong
+evidence this is a live sensor value, independent of `state`. At the
+same time, this capture is a second, independent confirmation of the
+"stale voltage/current after disconnect" finding above: voltage
+(12.6V), current (292mA), time (1230s), and three real-looking
+4.2V cell readings are ALSO present in this same no-battery frame -
+almost certainly the frozen tail end of the last completed charge
+session, not a live reading. That's exactly why those particular
+fields stay zeroed by design (see above) - this capture is fresh
+evidence that caution was correct, not overcautious.
+
+**Fix**: `parse_charge_info()` now decodes `temp_ext_c`/`temp_int_c`
+even in `ERROR_1`/`ERROR_2` states (they're charger-hardware sensor
+readings, not pack telemetry), while `capacity_mah`/`time_s`/
+`voltage_mv`/`current_ma`/`impedance_mohm`/`cells_mv` all stay
+zeroed/empty exactly as before - the split is deliberate, not a
+relaxation of the earlier fix. Verified via
+`test_parse_charge_info_zeroes_pack_telemetry_but_not_temp_in_error_state`.
+
+**Deliberately not touched, and a real open question**:
+`check_cell_count` (the `start --pack` and HTTP `/start {"pack": ...}`
+safety gate) reads `cells_mv` from a fresh `get_charge_info()` call,
+which returns `()` empty whenever `state` is ERROR_1/ERROR_2 - so the
+gate fails closed (refuses to start) any time the charger reports that
+state, regardless of what's physically connected. That's a safe
+default for the confirmed case (no battery, stale frozen data) - but
+it is NOT yet verified what `state` this charger reports the moment a
+real battery is freshly connected but a charge hasn't been started
+yet. This frame's own LEN byte (`0x22` = 34) matches a full-length
+response, not a short/truncated one - the device sends the same
+amount of data in this "error" state as in a normal one, it's just
+stale. If "idle, battery just connected, not yet started" *also*
+reports `state=2` on this hardware (plausible, unverified), `start
+--pack` would refuse to start with a perfectly good battery attached,
+which would be a real functional problem, not just an edge case.
+**Untested - needs a real hardware check**: connect a battery, read
+`b6ctl status` *before* sending `start`, and see what `state` comes
+back.

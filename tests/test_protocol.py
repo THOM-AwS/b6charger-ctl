@@ -166,14 +166,14 @@ def test_parse_charge_info_filters_out_floating_pin_noise_above_max():
     assert info.cells_mv == (4197, 4201, 4192)
 
 
-def test_parse_charge_info_zeroes_everything_but_state_and_error_in_error_state():
+def test_parse_charge_info_zeroes_pack_telemetry_but_not_temp_in_error_state():
     # Observed 2026-08-02: with no battery physically connected, the
     # charger's own panel showed nothing wrong, but the raw response
     # still carried a stale non-zero pack voltage/current from before
     # disconnection while charger_state read as an error. libb6's
     # Device.cc confirms it never reads anything past the error code in
-    # this case - so neither do we, rather than guessing. See
-    # DRY_RUN.md.
+    # this case - so neither do we, rather than guessing, for the
+    # pack-derived fields. See DRY_RUN.md.
     from b6charger.transport import FakeChargerTransport
 
     fake = FakeChargerTransport()
@@ -184,6 +184,7 @@ def test_parse_charge_info_zeroes_everything_but_state_and_error_in_error_state(
     fake.cells_mv = (4197, 4201, 4192)
     fake.pack_voltage_mv = 12605
     fake.current_ma = 292
+    fake.temp_int_c = 24  # matches the live no-battery capture in DRY_RUN.md
 
     info = protocol.parse_charge_info(fake._encode_charge_info())
     assert info.state_name == "ERROR_1"
@@ -195,6 +196,9 @@ def test_parse_charge_info_zeroes_everything_but_state_and_error_in_error_state(
     assert info.capacity_mah == 0
     assert info.time_s == 0
     assert info.impedance_mohm == 0
+    # unlike the pack-derived fields above, temp is a charger-hardware
+    # sensor reading and IS decoded even in an error state:
+    assert info.temp_int_c == 24
 
 
 def test_parse_charge_info_reports_unknown_error_name_for_unmapped_code():
