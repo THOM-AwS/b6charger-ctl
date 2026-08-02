@@ -127,5 +127,16 @@ both returned `sent STOP` immediately, no hang. Only one audible beep
 (on the first call) - no beep on the redundant second stop, no error
 state either time.
 
-Step 4 (`set-limits`, still no battery) is next, then step 5 (start,
-with a battery connected).
+**Step 4, completed and independently verified:** `set-limits
+--temp-limit 50` sent cleanly (no hang, matching the fix above). Initial
+observation was "no sound or change" on the panel - rather than hunt
+for the right screen, added `GET_SYS_INFO` support (`sysinfo` command)
+to verify programmatically instead. Readback confirmed
+`temp_limit_c == 50` exactly as sent. Every other decoded field
+(`cycle_time=10min`, `time_limit=on 180min`, `capacity_limit=on
+8000mAh`, `low_dc_limit=11.00V`, both buzzers True) was internally
+consistent and within valid range, which validates the whole
+`GET_SYS_INFO` offset mapping (`protocol.parse_sys_info`), not just the
+one field being tested.
+
+Only step 5 (`start`, with a battery connected) remains.
