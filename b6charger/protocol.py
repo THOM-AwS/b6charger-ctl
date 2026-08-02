@@ -383,3 +383,50 @@ def parse_charge_info(resp: bytes) -> ChargeInfo:
         impedance_mohm=u16(15),
         cells_mv=cells,
     )
+
+
+@dataclass(frozen=True)
+class SysInfo:
+    """Mirrors libb6's SysInfo struct - the currently-configured system
+    settings, as opposed to ChargeInfo's live-charge telemetry. This is
+    the only way to verify a set_* write actually took effect without
+    relying on finding the right screen on the front panel."""
+
+    cycle_time: int
+    time_limit_on: bool
+    time_limit_minutes: int
+    capacity_limit_on: bool
+    capacity_limit_mah: int
+    key_buzzer: bool
+    system_buzzer: bool
+    low_dc_limit_mv: int
+    temp_limit_c: int
+    voltage_mv: int
+    cells_mv: tuple[int, ...] = field(default_factory=tuple)
+
+
+def parse_sys_info(resp: bytes) -> SysInfo:
+    if len(resp) < 36 or resp[0] != 0x0F or resp[2] != Cmd.GET_SYS_INFO:
+        raise ProtocolError(f"not a GET_SYS_INFO response: {resp[:8].hex()}")
+
+    def u16(i: int) -> int:
+        return (resp[i] << 8) | resp[i + 1]
+
+    # offsets per Device::getSysInfo(), after the 4-byte header:
+    # cycleTime(u8) timeLimitOn(u8) timeLimit(u16) capLimitOn(u8)
+    # capLimit(u16) keyBuzzer(u8) systemBuzzer(u8) lowDCLimit(u16)
+    # <skip 2> tempLimit(u8) voltage(u16) cells[8](u16 each)
+    cells = tuple(u16(20 + 2 * i) for i in range(8) if u16(20 + 2 * i) >= CELL_MIN_MV)
+    return SysInfo(
+        cycle_time=resp[4],
+        time_limit_on=bool(resp[5]),
+        time_limit_minutes=u16(6),
+        capacity_limit_on=bool(resp[8]),
+        capacity_limit_mah=u16(9),
+        key_buzzer=bool(resp[11]),
+        system_buzzer=bool(resp[12]),
+        low_dc_limit_mv=u16(13),
+        temp_limit_c=resp[17],
+        voltage_mv=u16(18),
+        cells_mv=cells,
+    )

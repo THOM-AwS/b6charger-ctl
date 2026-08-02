@@ -161,3 +161,26 @@ def test_parse_charge_info_rejects_wrong_command():
     bad = bytes([0x0F, 0x03, 0xFE, 0x00]) + bytes(60)
     with pytest.raises(protocol.ProtocolError):
         protocol.parse_charge_info(bad)
+
+
+def test_parse_sys_info_round_trips_through_fake_transport_encoding():
+    from b6charger.transport import FakeChargerTransport
+
+    fake = FakeChargerTransport()
+    fake.temp_limit_c = 50
+    fake.time_limit_on = True
+    fake.time_limit_minutes = 200
+    fake.capacity_limit_mah = 6000
+
+    info = protocol.parse_sys_info(fake._encode_sys_info())
+    assert info.temp_limit_c == 50
+    assert info.time_limit_on is True
+    assert info.time_limit_minutes == 200
+    assert info.capacity_limit_mah == 6000
+    assert info.cells_mv == fake.cells_mv
+
+
+def test_parse_sys_info_rejects_wrong_command():
+    bad = bytes([0x0F, 0x03, 0x55, 0x00]) + bytes(60)
+    with pytest.raises(protocol.ProtocolError):
+        protocol.parse_sys_info(bad)

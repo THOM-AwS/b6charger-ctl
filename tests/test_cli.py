@@ -14,6 +14,15 @@ def test_status_json_against_fake(capsys):
     assert "cells_mv" in out
 
 
+def test_sysinfo_json_against_fake(capsys):
+    parser = cli.build_parser()
+    args = parser.parse_args(["--fake", "sysinfo", "--json"])
+    args.func(args)
+    out = json.loads(capsys.readouterr().out)
+    assert "temp_limit_c" in out
+    assert "cells_mv" in out
+
+
 def test_start_dry_run_does_not_prompt(capsys, monkeypatch):
     def fail_input(_prompt):  # dry-run must never call input()
         raise AssertionError("input() called during --dry-run")

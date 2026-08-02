@@ -122,6 +122,18 @@ class FakeChargerTransport:
         self.last_profile: protocol.ChargeProfile | None = None
         self._last_write: bytes = b""
 
+        # system settings - defaults per libb6's Device::getDefaultChargeProfile
+        # and the charger's own factory defaults where known.
+        self.cycle_time = 1
+        self.time_limit_on = False
+        self.time_limit_minutes = 200
+        self.capacity_limit_on = False
+        self.capacity_limit_mah = 5000
+        self.key_buzzer = True
+        self.system_buzzer = True
+        self.low_dc_limit_mv = 11000
+        self.temp_limit_c = 50
+
     def write(self, frame: bytes) -> None:
         self._last_write = frame
         cmd = frame[2]
@@ -133,15 +145,32 @@ class FakeChargerTransport:
             # payload layout: [battery_type, cell_count, mode, charge_current_hi,
             # charge_current_lo, ...] starting at frame[4] - see protocol.py
             self.current_ma = (frame[7] << 8) | frame[8]
+        elif cmd == 0x11:  # SET_SYSTEM - param_id at frame[3], value(s) from frame[5]
+            param_id = frame[3]
+            if param_id == protocol.SetSystemParam.CYCLE_TIME:
+                self.cycle_time = frame[5]
+            elif param_id == protocol.SetSystemParam.TIME_LIMIT:
+                self.time_limit_on = bool(frame[5])
+                self.time_limit_minutes = (frame[6] << 8) | frame[7]
+            elif param_id == protocol.SetSystemParam.CAPACITY_LIMIT:
+                self.capacity_limit_on = bool(frame[5])
+                self.capacity_limit_mah = (frame[6] << 8) | frame[7]
+            elif param_id == protocol.SetSystemParam.BUZZERS:
+                self.key_buzzer = bool(frame[5])
+                self.system_buzzer = bool(frame[6])
+            elif param_id == protocol.SetSystemParam.TEMP_LIMIT:
+                self.temp_limit_c = frame[5]
 
     def read(self, n: int = 64) -> bytes:
         cmd = self._last_write[2] if self._last_write else protocol.Cmd.GET_CHARGE_INFO
-        if cmd in (protocol.Cmd.STOP_CHARGING, protocol.START_CHARGING_CMD):
-            # These commands don't return a GET_CHARGE_INFO-shaped body on
-            # real hardware either (per libb6, the response is read but
-            # not parsed) - echo back something read()-safe.
-            return bytes(64)
-        return self._encode_charge_info()
+        if cmd == protocol.Cmd.GET_SYS_INFO:
+            return self._encode_sys_info()
+        if cmd == protocol.Cmd.GET_CHARGE_INFO:
+            return self._encode_charge_info()
+        # STOP/START/SET_SYSTEM don't return a GET_*_INFO-shaped body on
+        # real hardware either (per libb6, the response is read but not
+        # parsed) - echo back something read()-safe.
+        return bytes(64)
 
     def transact(self, frame: bytes, n: int = 64) -> bytes:
         self.write(frame)
@@ -161,4 +190,23 @@ class FakeChargerTransport:
         buf[15], buf[16] = divmod(12, 256)  # impedance_mohm
         for i, mv in enumerate(self.cells_mv):
             buf[17 + 2 * i], buf[18 + 2 * i] = divmod(mv, 256)
+        return bytes(buf)
+
+    def _encode_sys_info(self) -> bytes:
+        buf = bytearray(64)
+        buf[0] = 0x0F
+        buf[2] = protocol.Cmd.GET_SYS_INFO
+        buf[4] = self.cycle_time
+        buf[5] = int(self.time_limit_on)
+        buf[6], buf[7] = divmod(self.time_limit_minutes, 256)
+        buf[8] = int(self.capacity_limit_on)
+        buf[9], buf[10] = divmod(self.capacity_limit_mah, 256)
+        buf[11] = int(self.key_buzzer)
+        buf[12] = int(self.system_buzzer)
+        buf[13], buf[14] = divmod(self.low_dc_limit_mv, 256)
+        # bytes 15-16 skipped per Device::getSysInfo()
+        buf[17] = self.temp_limit_c
+        buf[18], buf[19] = divmod(self.pack_voltage_mv, 256)
+        for i, mv in enumerate(self.cells_mv):
+            buf[20 + 2 * i], buf[21 + 2 * i] = divmod(mv, 256)
         return bytes(buf)

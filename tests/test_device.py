@@ -38,3 +38,16 @@ def test_set_limits_do_not_reach_transport_in_dry_run():
     dev = Device(transport, dry_run=True)
     dev.set_cycle_time(30)
     assert transport._last_write == b""
+
+
+def test_set_temp_limit_is_visible_via_get_sys_info():
+    # mirrors the actual hardware verification step in DRY_RUN.md -
+    # set a limit, then confirm it reads back changed rather than just
+    # trusting that the write didn't error.
+    dev = Device(FakeChargerTransport())
+    before = dev.get_sys_info()
+    assert before.temp_limit_c != 45
+
+    dev.set_temp_limit(45)
+    after = dev.get_sys_info()
+    assert after.temp_limit_c == 45

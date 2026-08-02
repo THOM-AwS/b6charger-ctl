@@ -65,6 +65,40 @@ def _cmd_status(args: argparse.Namespace) -> None:
         print(f"  spread:   {spread}mV")
 
 
+def _cmd_sysinfo(args: argparse.Namespace) -> None:
+    dev = Device(_make_transport(args))
+    info = dev.get_sys_info()
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "cycle_time_min": info.cycle_time,
+                    "time_limit_on": info.time_limit_on,
+                    "time_limit_minutes": info.time_limit_minutes,
+                    "capacity_limit_on": info.capacity_limit_on,
+                    "capacity_limit_mah": info.capacity_limit_mah,
+                    "key_buzzer": info.key_buzzer,
+                    "system_buzzer": info.system_buzzer,
+                    "low_dc_limit_mv": info.low_dc_limit_mv,
+                    "temp_limit_c": info.temp_limit_c,
+                    "voltage_mv": info.voltage_mv,
+                    "cells_mv": list(info.cells_mv),
+                }
+            )
+        )
+        return
+    print(f"cycle_time:      {info.cycle_time}min")
+    print(f"time_limit:      {'on' if info.time_limit_on else 'off'} {info.time_limit_minutes}min")
+    print(f"capacity_limit:  {'on' if info.capacity_limit_on else 'off'} {info.capacity_limit_mah}mAh")
+    print(f"temp_limit:      {info.temp_limit_c}C")
+    print(f"low_dc_limit:    {info.low_dc_limit_mv / 1000:.2f}V")
+    print(f"key_buzzer:      {info.key_buzzer}")
+    print(f"system_buzzer:   {info.system_buzzer}")
+    print(f"voltage:         {info.voltage_mv / 1000:.3f}V")
+    for i, mv in enumerate(info.cells_mv, 1):
+        print(f"  cell {i}:   {mv / 1000:.3f}V")
+
+
 def _confirm_and_send_start(dev: Device, profile: protocol.ChargeProfile, args) -> None:
     print("About to send START with:")
     print(f"  battery_type = {profile.battery_type.name}")
@@ -131,6 +165,12 @@ def build_parser() -> argparse.ArgumentParser:
     st = sub.add_parser("status", help="read current charge info")
     st.add_argument("--json", action="store_true")
     st.set_defaults(func=_cmd_status)
+
+    sysinfo = sub.add_parser(
+        "sysinfo", help="read current system settings (verify set-limits took effect)"
+    )
+    sysinfo.add_argument("--json", action="store_true")
+    sysinfo.set_defaults(func=_cmd_sysinfo)
 
     start = sub.add_parser("start", help="start a charge (LiPo/LiHV)")
     start.add_argument("--chemistry", choices=["lipo", "lihv"], required=True)

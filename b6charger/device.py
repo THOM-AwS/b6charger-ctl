@@ -31,6 +31,10 @@ class Device:
         resp = self._t.transact(protocol.build_get_charge_info())
         return protocol.parse_charge_info(resp)
 
+    def get_sys_info(self) -> protocol.SysInfo:
+        resp = self._t.transact(protocol.build_get_sys_info())
+        return protocol.parse_sys_info(resp)
+
     # --- charge control ---------------------------------------------
 
     def start_charging(self, profile: protocol.ChargeProfile) -> None:
