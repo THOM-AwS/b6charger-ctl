@@ -23,14 +23,12 @@ class Device:
         log.info("%s: %s", description, frame.hex())
         if self.dry_run:
             return None
-        self._t.write(frame)
-        return self._t.read()
+        return self._t.transact(frame)
 
     # --- reads -----------------------------------------------------
 
     def get_charge_info(self) -> protocol.ChargeInfo:
-        self._t.write(protocol.build_get_charge_info())
-        resp = self._t.read()
+        resp = self._t.transact(protocol.build_get_charge_info())
         return protocol.parse_charge_info(resp)
 
     # --- charge control ---------------------------------------------

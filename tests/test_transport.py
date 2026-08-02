@@ -33,3 +33,14 @@ def test_fake_transport_stop_charging_transitions_to_complete():
     info = protocol.parse_charge_info(fake.read())
     assert info.state == protocol.State.COMPLETE
     assert info.current_ma == 0
+
+
+def test_fake_transport_transact_matches_write_then_read():
+    # this is the method Device actually calls - confirm it's equivalent
+    # to the write()/read() pair the tests above exercise separately.
+    fake = FakeChargerTransport()
+    resp = fake.transact(protocol.build_start_charging(protocol.lipo_profile(3, 1500)))
+    assert resp == bytes(64)
+    info = protocol.parse_charge_info(fake.transact(protocol.build_get_charge_info()))
+    assert info.state == protocol.State.CHARGING
+    assert info.current_ma == 1500

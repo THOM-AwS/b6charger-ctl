@@ -1,68 +1,105 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """HID transport for talking to the charger, plus a fake implementation
-for testing the whole stack with no hardware attached (i.e. right now,
-while a real charge is in progress on charger-pi and shouldn't be
-disturbed).
+for testing the whole stack with no hardware attached.
+
+Lesson from the first real hardware test (2026-08-02, see DRY_RUN.md):
+a `stop` sent seconds after a successful one hung forever. Two design
+issues contributed, both fixed here:
+
+1. write() and read() used to open and close SEPARATE file descriptors.
+   ht-infra's b6_poller.py - the only code that's ever reliably talked
+   to this hardware - always does open -> write -> read -> close on ONE
+   fd. transact() below matches that exactly instead of assuming
+   split write/read is equivalent.
+2. There was no timeout, so if a command genuinely doesn't produce a
+   response in some device state (or another process, e.g. b6_poller's
+   own 30s poll, grabs the reply first), the read blocked forever. A
+   control tool where `stop` can hang is a real reliability problem -
+   it now raises DeviceTimeout instead.
+
+A per-process-pair flock also serializes transact() calls against
+OTHER b6charger-ctl invocations (e.g. two `b6ctl` commands run close
+together). It does NOT protect against ht-infra's b6_poller.py, which
+is a separate codebase that doesn't know about this lock - stop that
+service before any manual write testing (see DRY_RUN.md).
 """
 
 from __future__ import annotations
 
+import fcntl
 import glob
 import os
+import select
 from typing import Protocol
 
 from b6charger import protocol
 
+DEFAULT_TIMEOUT_S = 3.0
+DEFAULT_LOCK_PATH = "/tmp/b6charger-ctl.lock"
 
-class Transport(Protocol):
-    def write(self, frame: bytes) -> None: ...
 
-    def read(self, n: int = 64) -> bytes: ...
+class DeviceTimeout(Exception):
+    pass
 
 
 class NoChargerFound(Exception):
     pass
 
 
-class HidRawTransport:
-    """Real hardware, over /dev/hidraw*. Same discovery approach as
-    ht-infra's b6_poller.py: try every hidraw device, keep the first one
-    that answers a GET_CHARGE_INFO-shaped response."""
+class Transport(Protocol):
+    def transact(self, frame: bytes, n: int = 64) -> bytes: ...
 
-    def __init__(self, device_path: str | None = None) -> None:
-        self._path = device_path or self._discover()
+
+class HidRawTransport:
+    """Real hardware, over /dev/hidraw*."""
+
+    def __init__(
+        self,
+        device_path: str | None = None,
+        timeout_s: float = DEFAULT_TIMEOUT_S,
+        lock_path: str = DEFAULT_LOCK_PATH,
+    ) -> None:
+        self._path = device_path or self._discover(timeout_s)
+        self._timeout_s = timeout_s
+        self._lock_path = lock_path
 
     @staticmethod
-    def _discover() -> str:
+    def _discover(timeout_s: float) -> str:
         for dev in sorted(glob.glob("/dev/hidraw*")):
             try:
-                fd = os.open(dev, os.O_RDWR)
-            except OSError:
+                resp = HidRawTransport._raw_transact(
+                    dev, protocol.build_get_charge_info(), timeout_s
+                )
+            except (OSError, DeviceTimeout):
                 continue
-            try:
-                os.write(fd, protocol.build_get_charge_info())
-                resp = os.read(fd, 64)
-            except OSError:
-                continue
-            finally:
-                os.close(fd)
             if len(resp) >= 3 and resp[0] == 0x0F and resp[2] == protocol.Cmd.GET_CHARGE_INFO:
                 return dev
         raise NoChargerFound("no /dev/hidraw* device answered GET_CHARGE_INFO")
 
-    def write(self, frame: bytes) -> None:
-        fd = os.open(self._path, os.O_RDWR)
+    @staticmethod
+    def _raw_transact(path: str, frame: bytes, timeout_s: float, n: int = 64) -> bytes:
+        fd = os.open(path, os.O_RDWR)
         try:
             os.write(fd, frame)
-        finally:
-            os.close(fd)
-
-    def read(self, n: int = 64) -> bytes:
-        fd = os.open(self._path, os.O_RDWR)
-        try:
+            ready, _, _ = select.select([fd], [], [], timeout_s)
+            if not ready:
+                raise DeviceTimeout(
+                    f"no response within {timeout_s}s to frame {frame.hex()} - "
+                    "check nothing else (e.g. ht-infra's b6_poller.py) is also "
+                    "talking to the device right now"
+                )
             return os.read(fd, n)
         finally:
             os.close(fd)
+
+    def transact(self, frame: bytes, n: int = 64) -> bytes:
+        lock_fd = os.open(self._lock_path, os.O_CREAT | os.O_RDWR, 0o666)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            return self._raw_transact(self._path, frame, self._timeout_s, n)
+        finally:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
 
 
 class FakeChargerTransport:
@@ -70,7 +107,9 @@ class FakeChargerTransport:
     protocol/device/CLI stack without hardware. NOT a claim that this
     matches real firmware timing or edge-case behaviour - it exists so
     frame encoding, response parsing, and the CLI/HTTP plumbing can be
-    tested before the first real command is ever sent.
+    tested before a real command is sent, and it deliberately has no
+    timing/concurrency quirks of its own (those are exactly what real
+    hardware testing is for - see DRY_RUN.md).
     """
 
     def __init__(self) -> None:
@@ -103,6 +142,10 @@ class FakeChargerTransport:
             # not parsed) - echo back something read()-safe.
             return bytes(64)
         return self._encode_charge_info()
+
+    def transact(self, frame: bytes, n: int = 64) -> bytes:
+        self.write(frame)
+        return self.read(n)
 
     def _encode_charge_info(self) -> bytes:
         buf = bytearray(64)
