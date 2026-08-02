@@ -288,45 +288,66 @@ touch settings you didn't mention. Verify any change with
 
 ## HTTP API
 
-A thin control surface next to (not merged into) ht-infra's read-only
-`b6_poller.py` exporter - deliberately a separate process/port, since a
-monitoring endpoint and a control endpoint have very different blast
-radii if either has a bug.
+One daemon (`b6httpd`) serving both a Prometheus `/metrics` endpoint
+and control endpoints (`/start`, `/stop`) - fully self-contained in
+this repo, no external services required.
+
+Two independent safety levers rather than one:
+
+- **Network exposure** (`--host`/`--port`/`--listen`) defaults to
+  `0.0.0.0`, since `/metrics` and `/status` are read-only and safe to
+  expose broadly - e.g. for Prometheus scraping from another host.
+- **Write capability** (`--enable-writes`) is **off by default,
+  regardless of bind address**. Without it, `POST /start` and
+  `POST /stop` return `403` immediately, before touching the device at
+  all - the daemon can sit on the network answering `/metrics` all day
+  with zero ability for anyone to command the charger, unless you
+  deliberately started it with `--enable-writes`.
 
 ```bash
-b6httpd --port 9111                 # binds 127.0.0.1:9111 - widen deliberately
-b6httpd --listen 0.0.0.0:9111       # combined interface:port form
-b6httpd --listen [::1]:9111         # IPv6 needs bracket notation
+b6httpd                                          # metrics/status only - writes always 403
+b6httpd --enable-writes                          # also allow /start and /stop
+b6httpd --listen 0.0.0.0:9111 --enable-writes    # combined interface:port form
+b6httpd --listen [::1]:9111                      # IPv6 needs bracket notation
 ```
 
 ### `b6httpd` flags
 
 | Flag | Values | Default | Meaning |
 |---|---|---|---|
-| `--host` | an interface address, e.g. `0.0.0.0` | `127.0.0.1` | Interface to bind. Mutually exclusive with `--listen` |
+| `--host` | an interface address, e.g. `0.0.0.0` | `0.0.0.0` | Interface to bind. Mutually exclusive with `--listen` |
 | `--port` | integer, 1-65535 | `9111` | Port to bind. Mutually exclusive with `--listen` |
 | `--listen` | `HOST:PORT`, e.g. `0.0.0.0:9111`; IPv6 as `[HOST]:PORT`, e.g. `[::1]:9111` | - | Combined interface+port in one flag. Mutually exclusive with `--host`/`--port` - use one form or the other |
+| `--enable-writes` | (boolean) | **off** | Allow `POST /start`/`POST /stop`. Without this, both return `403` regardless of bind address |
 | `--fake` | (boolean) | off | Use an in-memory simulated charger - no hardware touched at all |
 | `--device` | a path, e.g. `/dev/hidraw0` | auto-discover | Use a specific device instead of probing every `/dev/hidraw*` |
-| `--dry-run` | (boolean) | off | Log every write but send nothing to the device |
-
-Binding to anything beyond `127.0.0.1` is a real decision - this
-process can be told to command a LiPo charger by anyone who can reach
-that address. Widen it deliberately, not by default.
+| `--dry-run` | (boolean) | off | With `--enable-writes`, log writes but send nothing to the device |
+| `--cache-seconds` | float, seconds | `5.0` | How long a rendered `/metrics` body is reused before polling the device again |
 
 ### Endpoints
 
 ```
-GET  /status              -> same fields as `b6ctl status --json`
+GET  /metrics             -> Prometheus text format (always available)
+GET  /status               -> same fields as `b6ctl status --json` (always available)
 POST /start {"chemistry": "lipo", "cells": 3, "current_ma": 1500, "mode": "balance"}
 POST /stop
 ```
 
-Every write is logged with the caller's address before being sent.
-Note: the HTTP API doesn't currently support the `packs.toml` registry
-or its cell-count cross-check - it takes a raw profile. If you build
-automation against it, consider porting that same safety check here
-first.
+`POST /start` and `POST /stop` return `403` unless the daemon was
+started with `--enable-writes`. Every write that does go through is
+logged with the caller's address first.
+
+`/metrics` reports the same metric names this project has always used
+(`charger_state`, `charger_cell_millivolts{cell="N"}`,
+`charger_cell_count`, `charger_cell_spread_millivolts`, etc.) plus
+`charger_impedance_milliohms` - the data was always in
+`GET_CHARGE_INFO`, it just wasn't decoded before. Point Prometheus (or
+`curl`) at `http://<host>:9111/metrics`.
+
+Note: unlike `b6ctl start --pack`, the HTTP `/start` endpoint doesn't
+support the `packs.toml` registry or its live cell-count cross-check -
+it takes a raw profile. If you build automation against it, consider
+porting that same safety check here first.
 
 ## Can this identify the battery automatically?
 

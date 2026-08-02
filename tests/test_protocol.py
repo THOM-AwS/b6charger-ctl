@@ -165,6 +165,37 @@ def test_parse_charge_info_filters_out_floating_pin_noise_above_max():
     assert info.cells_mv == (4197, 4201, 4192)
 
 
+def test_parse_charge_info_zeroes_voltage_and_current_when_no_real_cells():
+    # Observed 2026-08-02: with no battery physically connected, the
+    # charger's own panel showed nothing wrong, but the raw response
+    # still carried a stale non-zero pack voltage/current from before
+    # disconnection. Since no real cells are detected, there's no
+    # battery to report a voltage/current for - zero them rather than
+    # passing through leftover values. See DRY_RUN.md.
+    from b6charger.transport import FakeChargerTransport
+
+    fake = FakeChargerTransport()
+    fake.cells_mv = ()  # nothing plugged in
+    fake.pack_voltage_mv = 12605  # stale leftover reading from before disconnect
+    fake.current_ma = 292
+
+    info = protocol.parse_charge_info(fake._encode_charge_info())
+    assert info.cells_mv == ()
+    assert info.voltage_mv == 0
+    assert info.current_ma == 0
+
+
+def test_parse_charge_info_keeps_voltage_and_current_when_cells_present():
+    from b6charger.transport import FakeChargerTransport
+
+    fake = FakeChargerTransport()  # default: 3 real cells, non-zero voltage
+
+    info = protocol.parse_charge_info(fake._encode_charge_info())
+    assert info.cells_mv != ()
+    assert info.voltage_mv == fake.pack_voltage_mv
+    assert info.current_ma == fake.current_ma
+
+
 def test_parse_charge_info_rejects_wrong_command():
     bad = bytes([0x0F, 0x03, 0xFE, 0x00]) + bytes(60)
     with pytest.raises(protocol.ProtocolError):

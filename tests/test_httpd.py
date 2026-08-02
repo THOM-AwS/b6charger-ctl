@@ -1,19 +1,35 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Tests for b6httpd's --listen/--host/--port argument handling."""
+"""Tests for b6httpd: argument handling, metrics rendering/caching, and the
+--enable-writes gate on the write endpoints (tested against a real running
+server, not just the internal handler logic, since the actual HTTP status
+codes are the thing that matters here).
+"""
 
 from __future__ import annotations
 
 import argparse
+import json
+import threading
+import urllib.error
+import urllib.request
+from http.server import ThreadingHTTPServer
 
 import pytest
 
+from b6charger.device import Device
 from b6charger.httpd import (
     DEFAULT_HOST,
     DEFAULT_PORT,
+    MetricsCache,
     build_parser,
+    make_handler,
     parse_listen_address,
+    render_metrics,
     resolve_host_port,
 )
+from b6charger.transport import FakeChargerTransport
+
+# --- --listen / --host / --port parsing -----------------------------
 
 
 @pytest.mark.parametrize(
@@ -50,14 +66,20 @@ def test_resolve_host_port_defaults_when_nothing_given():
     assert resolve_host_port(args) == (DEFAULT_HOST, DEFAULT_PORT)
 
 
+def test_default_host_is_wide_open_by_design():
+    # metrics/status are read-only and meant to be scrapeable - the write
+    # endpoints are what --enable-writes exists to gate, independently.
+    assert DEFAULT_HOST == "0.0.0.0"
+
+
 def test_resolve_host_port_with_separate_host_and_port():
-    args = build_parser().parse_args(["--fake", "--host", "0.0.0.0", "--port", "1234"])
-    assert resolve_host_port(args) == ("0.0.0.0", 1234)
+    args = build_parser().parse_args(["--fake", "--host", "127.0.0.1", "--port", "1234"])
+    assert resolve_host_port(args) == ("127.0.0.1", 1234)
 
 
 def test_resolve_host_port_with_host_only_keeps_default_port():
-    args = build_parser().parse_args(["--fake", "--host", "0.0.0.0"])
-    assert resolve_host_port(args) == ("0.0.0.0", DEFAULT_PORT)
+    args = build_parser().parse_args(["--fake", "--host", "127.0.0.1"])
+    assert resolve_host_port(args) == ("127.0.0.1", DEFAULT_PORT)
 
 
 def test_resolve_host_port_with_listen():
@@ -80,3 +102,237 @@ def test_resolve_host_port_with_listen_and_port_is_rejected(capsys):
     with pytest.raises(SystemExit):
         resolve_host_port(args)
     assert "cannot be combined" in capsys.readouterr().err
+
+
+def test_enable_writes_defaults_to_off():
+    args = build_parser().parse_args(["--fake"])
+    assert args.enable_writes is False
+
+
+# --- metrics rendering -------------------------------------------------
+
+
+def test_render_metrics_reports_charger_up_1_and_core_fields():
+    device = Device(FakeChargerTransport())
+    body = render_metrics(device)
+    assert "charger_up 1" in body
+    assert "charger_state 3" in body  # FakeChargerTransport starts COMPLETE
+    assert "charger_cell_count 3" in body
+    assert 'charger_cell_millivolts{cell="1"}' in body
+    assert "charger_impedance_milliohms 12" in body
+
+
+def test_render_metrics_reports_charger_up_0_on_failure():
+    class BrokenTransport:
+        def transact(self, frame, n=64):
+            raise OSError("no such device")
+
+    device = Device(BrokenTransport())
+    body = render_metrics(device)
+    assert body.strip().endswith("charger_up 0")
+    assert "charger_state" not in body
+
+
+# --- MetricsCache --------------------------------------------------
+
+
+def test_metrics_cache_reuses_body_within_window(monkeypatch):
+    calls = []
+
+    def render():
+        calls.append(1)
+        return f"call {len(calls)}"
+
+    times = iter([100.0, 100.1, 100.2])
+    monkeypatch.setattr("b6charger.httpd.time.monotonic", lambda: next(times))
+
+    cache = MetricsCache(render, cache_s=5.0)
+    first = cache.get()
+    second = cache.get()
+    assert first == second == "call 1"
+    assert len(calls) == 1
+
+
+def test_metrics_cache_refreshes_after_expiry(monkeypatch):
+    calls = []
+
+    def render():
+        calls.append(1)
+        return f"call {len(calls)}"
+
+    # MetricsCache.get() calls time.monotonic() twice per refresh (once to
+    # check staleness, once to stamp the new cache time) - two refreshes
+    # needs four values.
+    times = iter([100.0, 100.0, 200.0, 200.0])
+    monkeypatch.setattr("b6charger.httpd.time.monotonic", lambda: next(times))
+
+    cache = MetricsCache(render, cache_s=5.0)
+    first = cache.get()
+    second = cache.get()
+    assert first == "call 1"
+    assert second == "call 2"
+    assert len(calls) == 2
+
+
+# --- end-to-end server: the --enable-writes gate ------------------------
+
+
+@pytest.fixture
+def running_server():
+    """Start a real b6httpd server (--fake charger) on an OS-assigned port.
+
+    Yields (base_url, enable_writes_setter) - tests choose enable_writes
+    per-case by constructing their own server, so this fixture is a
+    factory-style helper via a small local function instead.
+    """
+
+    servers = []
+
+    def start(enable_writes: bool):
+        device = Device(FakeChargerTransport())
+        cache = MetricsCache(lambda: render_metrics(device), cache_s=0.0)
+        server = ThreadingHTTPServer(
+            ("127.0.0.1", 0), make_handler(device, cache, enable_writes)
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        servers.append(server)
+        port = server.server_address[1]
+        return f"http://127.0.0.1:{port}"
+
+    yield start
+
+    for server in servers:
+        server.shutdown()
+        server.server_close()
+
+
+def test_metrics_and_status_work_without_enable_writes(running_server):
+    base_url = running_server(enable_writes=False)
+    with urllib.request.urlopen(f"{base_url}/metrics") as resp:
+        assert resp.status == 200
+        assert "charger_up 1" in resp.read().decode()
+    with urllib.request.urlopen(f"{base_url}/status") as resp:
+        assert resp.status == 200
+
+
+def test_start_and_stop_return_403_without_enable_writes(running_server):
+    base_url = running_server(enable_writes=False)
+    body = json.dumps({"chemistry": "lipo", "cells": 3, "current_ma": 1500}).encode()
+
+    req = urllib.request.Request(f"{base_url}/start", data=body, method="POST")
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        urllib.request.urlopen(req)
+    assert exc_info.value.code == 403
+
+    req = urllib.request.Request(f"{base_url}/stop", data=b"{}", method="POST")
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        urllib.request.urlopen(req)
+    assert exc_info.value.code == 403
+
+
+def test_start_and_stop_work_with_enable_writes(running_server):
+    base_url = running_server(enable_writes=True)
+    body = json.dumps({"chemistry": "lipo", "cells": 3, "current_ma": 1500}).encode()
+
+    req = urllib.request.Request(f"{base_url}/start", data=body, method="POST")
+    with urllib.request.urlopen(req) as resp:
+        assert resp.status == 200
+        assert json.loads(resp.read())["ok"] is True
+
+    req = urllib.request.Request(f"{base_url}/stop", data=b"{}", method="POST")
+    with urllib.request.urlopen(req) as resp:
+        assert resp.status == 200
+
+
+# --- POST /start with {"pack": "name"} - the HTTP equivalent of ---------
+# --- `b6ctl start --pack`, including the live cell-count cross-check ----
+
+
+def _write_test_registry(tmp_path, monkeypatch) -> None:
+    """Same throwaway registry shape as tests/test_cli.py's helper: one
+    pack matching FakeChargerTransport's 3-cell default, one deliberately
+    mismatched at 4S."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "packs.toml").write_text("""
+        [[pack]]
+        name = "matches_fake"
+        description = "3S, matches FakeChargerTransport's default 3 cells"
+        chemistry = "lipo"
+        cells = 3
+        capacity_mah = 2200
+        default_current_ma = 1100
+
+        [[pack]]
+        name = "wrong_cell_count"
+        description = "4S - deliberately does not match the fake's 3 cells"
+        chemistry = "lihv"
+        cells = 4
+        capacity_mah = 1500
+        default_current_ma = 750
+        """)
+
+
+def test_post_start_with_matching_pack_succeeds(running_server, tmp_path, monkeypatch):
+    _write_test_registry(tmp_path, monkeypatch)
+    base_url = running_server(enable_writes=True)
+
+    body = json.dumps({"pack": "matches_fake"}).encode()
+    req = urllib.request.Request(f"{base_url}/start", data=body, method="POST")
+    with urllib.request.urlopen(req) as resp:
+        assert resp.status == 200
+        assert json.loads(resp.read())["ok"] is True
+
+
+def test_post_start_with_mismatched_pack_returns_409(running_server, tmp_path, monkeypatch):
+    _write_test_registry(tmp_path, monkeypatch)
+    base_url = running_server(enable_writes=True)
+
+    body = json.dumps({"pack": "wrong_cell_count"}).encode()
+    req = urllib.request.Request(f"{base_url}/start", data=body, method="POST")
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        urllib.request.urlopen(req)
+    assert exc_info.value.code == 409
+    error = json.loads(exc_info.value.read())["error"]
+    assert "wrong_cell_count" in error
+    assert "4S" in error
+    assert "detects 3 real cell" in error
+
+
+def test_post_start_with_unknown_pack_returns_400(running_server, tmp_path, monkeypatch):
+    _write_test_registry(tmp_path, monkeypatch)
+    base_url = running_server(enable_writes=True)
+
+    body = json.dumps({"pack": "does_not_exist"}).encode()
+    req = urllib.request.Request(f"{base_url}/start", data=body, method="POST")
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        urllib.request.urlopen(req)
+    assert exc_info.value.code == 400
+
+
+def test_post_start_with_pack_current_override_above_max_returns_400(
+    running_server, tmp_path, monkeypatch
+):
+    _write_test_registry(tmp_path, monkeypatch)
+    base_url = running_server(enable_writes=True)
+
+    body = json.dumps({"pack": "matches_fake", "current_ma": 50000}).encode()
+    req = urllib.request.Request(f"{base_url}/start", data=body, method="POST")
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        urllib.request.urlopen(req)
+    assert exc_info.value.code == 400
+    assert "exceeds" in json.loads(exc_info.value.read())["error"]
+
+
+def test_post_start_with_pack_is_also_blocked_without_enable_writes(
+    running_server, tmp_path, monkeypatch
+):
+    # the --enable-writes gate applies before the pack lookup even runs.
+    _write_test_registry(tmp_path, monkeypatch)
+    base_url = running_server(enable_writes=False)
+
+    body = json.dumps({"pack": "matches_fake"}).encode()
+    req = urllib.request.Request(f"{base_url}/start", data=body, method="POST")
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        urllib.request.urlopen(req)
+    assert exc_info.value.code == 403

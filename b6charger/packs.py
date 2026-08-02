@@ -44,6 +44,25 @@ class PackConfigError(Exception):
     """
 
 
+class PackCellMismatch(Exception):
+    """A pack's registered cell count doesn't match what the charger currently detects.
+
+    This is the exception `check_cell_count` raises - callers (the CLI,
+    the HTTP daemon) catch it and decide how to present the mismatch
+    (stderr + exit, or an HTTP error response), since that's presentation
+    logic this module shouldn't need to know about.
+    """
+
+    def __init__(self, pack: Pack, detected_cells: int) -> None:
+        """Store `pack`/`detected_cells` and build the shared error message."""
+        self.pack = pack
+        self.detected_cells = detected_cells
+        super().__init__(
+            f"pack '{pack.name}' is configured as {pack.cells}S, but the charger "
+            f"currently detects {detected_cells} real cell(s) connected"
+        )
+
+
 @dataclass(frozen=True)
 class Pack:
     """One battery pack's known-good charge settings, as configured in packs.toml.
@@ -210,3 +229,18 @@ def _load_from_path(path: Path, is_example: bool) -> PackRegistry:
         packs[name] = _validate_pack(name, raw)
 
     return PackRegistry(packs=packs, source_path=path, is_example=is_example)
+
+
+def check_cell_count(pack: Pack, detected_cells: int) -> None:
+    """Raise PackCellMismatch if `detected_cells` doesn't match `pack.cells`.
+
+    This is the core safety check `--pack` exists for, shared between
+    `b6ctl start --pack` and the HTTP daemon's `POST /start` so both
+    interfaces enforce it identically. Deliberately takes an already-
+    read cell count rather than a Device/Transport, so this module
+    stays hardware-agnostic - the caller does the live read (which
+    should always be a real read, even in --dry-run, since dry-run
+    should tell the truth about whether a real send would be blocked).
+    """
+    if detected_cells != pack.cells:
+        raise PackCellMismatch(pack, detected_cells)

@@ -265,15 +265,15 @@ def _check_pack_cell_count_matches_device(dev: Device, pack: Pack) -> None:
     explanation on mismatch; does nothing (returns) if the counts agree.
     """
     info = dev.get_charge_info()
-    detected = len(info.cells_mv)
-    if detected != pack.cells:
+    try:
+        packs.check_cell_count(pack, len(info.cells_mv))
+    except packs.PackCellMismatch as e:
         print(
-            f"error: pack '{pack.name}' is configured as {pack.cells}S, but the "
-            f"charger currently detects {detected} real cell(s) connected - "
-            "refusing to start. Check the physical connection and the pack "
-            "you meant to select before retrying. (No flag skips this check "
-            "on purpose - use the manual --chemistry/--cells/--current-ma "
-            "flags directly if you're certain and need to override.)",
+            f"error: {e} - refusing to start. Check the physical connection "
+            "and the pack you meant to select before retrying. (No flag "
+            "skips this check on purpose - use the manual --chemistry/"
+            "--cells/--current-ma flags directly if you're certain and need "
+            "to override.)",
             file=sys.stderr,
         )
         sys.exit(1)

@@ -164,8 +164,41 @@ excludes a real reading) - verified fixed live: cells 1-3 correctly
 shown (4.202/4.204/4.196V, 8mV spread), no phantom cells.
 
 **Everything in the original test plan is now verified against real
-hardware.** Follow-up worth doing: port the same `CELL_MAX_MV` fix to
-`ht-infra`'s `b6_poller.py`, since it uses the identical floor-only
-check and could be reporting the same phantom-cell noise into
-production Grafana/alerting whenever a smaller pack is charged on a
-socket built for more cells.
+hardware.** Follow-up done: the `CELL_MAX_MV` fix was ported to
+`ht-infra`'s `b6_poller.py` too (same floor-only check, same gap),
+merged, and confirmed live in production - see the finding below for
+what that surfaced.
+
+## Real production finding: stale voltage/current after disconnect (2026-08-02)
+
+With no battery physically connected to the charger, Grafana showed
+`charger_state = 2` (ERROR per both this project's and the original
+exporter's state mapping) alongside a non-zero, unmoving pack voltage
+(~12.6V) and current (~292mA) - looking like a fault. Checked the
+charger's own front panel directly: **it showed nothing wrong, no
+error code, looked completely normal.**
+
+That mismatch (exporter says ERROR, panel says fine) plus the
+non-zero voltage while genuinely disconnected (a real "no battery"
+read earlier in this project correctly showed ~0.005V, see above)
+points at the charger's own response still carrying stale/leftover
+values from before disconnection, rather than fresh zeros - not
+confirmed to be a byte-offset parsing bug (libb6's `Device.cc` inserts
+a 2-byte error code after the state byte during `ERROR_1`/`ERROR_2`
+that neither this project nor the original exporter has ever decoded,
+so that remains a real, separate, still-open gap - just not
+confirmed as the cause here).
+
+**Fix applied regardless of root cause**: `parse_charge_info()` now
+zeroes `voltage_mv`/`current_ma` whenever no real cells are detected
+(`cells_mv` empty) - no real cells means no battery is actually
+connected, so a pack voltage/current reading isn't meaningful
+regardless of what raw bytes the charger returns. Verified via
+`test_parse_charge_info_zeroes_voltage_and_current_when_no_real_cells`.
+
+**Still open**: decoding the actual `ERROR` code (Enum.hh has a named
+list - `NO_BATTERY`, `BATTERY_FULL`, `CONNECTION_BROKEN_*`, etc.) would
+turn `charger_state=2` from a bare number into an actionable message,
+and would let us stop guessing whether error-state responses need a
+2-byte offset correction. Worth doing before trusting any other field
+during an active error state.

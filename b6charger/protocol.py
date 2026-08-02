@@ -26,11 +26,14 @@ Two command families share this framing:
 3. START_CHARGING: header is [0x0F, LEN, 0x05, 0x00], payload is the
    full ChargeProfile.
 
-Only GET_CHARGE_INFO has been exercised against real hardware so far
-(via ht-infra's b6_poller.py). Everything else here is implemented
-strictly from libb6's Device.cc/Packet.cc/Enum.hh and has NOT been
-validated against a physical charger yet - see README.md's hardware
-test checklist before trusting the write path.
+GET_CHARGE_INFO, GET_SYS_INFO, STOP_CHARGING, SET_SYSTEM (temp limit),
+and START_CHARGING (LiPo/LiHV) have all been validated against a real
+Jaycar POWERTECH PLUS MB-3633 - see DRY_RUN.md for the live trace of
+each. Everything else (GET_DEV_INFO, the other SET_SYSTEM parameters,
+NiMH/NiCd/Pb chemistries) is implemented strictly from libb6's
+Device.cc/Packet.cc/Enum.hh and is unverified against physical
+hardware - see DRY_RUN.md's hardware test plan before trusting an
+unverified command for real.
 """
 
 from __future__ import annotations
@@ -442,12 +445,23 @@ def parse_charge_info(resp: bytes) -> ChargeInfo:
         return (resp[i] << 8) | resp[i + 1]
 
     cells = tuple(u16(17 + 2 * i) for i in range(8) if _is_real_cell(u16(17 + 2 * i)))
+
+    # No real cells detected means no battery is actually connected -
+    # pack voltage/current aren't meaningful readings in that state, and
+    # have been observed to report stale/leftover non-zero values rather
+    # than genuinely-fresh data once a pack is disconnected (see
+    # DRY_RUN.md). Zeroing them here reflects reality ("nothing plugged
+    # in, nothing to report") rather than passing through whatever the
+    # charger happens to still be holding.
+    voltage_mv = u16(9) if cells else 0
+    current_ma = u16(11) if cells else 0
+
     return ChargeInfo(
         state=resp[4],
         capacity_mah=u16(5),
         time_s=u16(7),
-        voltage_mv=u16(9),
-        current_ma=u16(11),
+        voltage_mv=voltage_mv,
+        current_ma=current_ma,
         temp_ext_c=resp[13],
         temp_int_c=resp[14],
         impedance_mohm=u16(15),
