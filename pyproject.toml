@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "b6charger-ctl"
+version = "0.1.0"
+description = "Read/write control for SkyRC B6-family balance chargers (iMAX B6 / B6AC / B6 mini and rebadged clones)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "GPL-3.0-or-later" }
+dependencies = []
+
+[project.scripts]
+b6ctl = "b6charger.cli:main"
+b6httpd = "b6charger.httpd:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[tool.setuptools]
+packages = ["b6charger"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
