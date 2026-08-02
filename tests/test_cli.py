@@ -254,3 +254,78 @@ def test_start_pack_dry_run_still_runs_the_cell_count_check(tmp_path, monkeypatc
         assert e.code == 1
     assert raised
     assert "detects 3 real cell" in capsys.readouterr().err
+
+
+# --- `serve` subcommand: argument parsing / host+port resolution -------
+# httpd.py's own tests cover render_metrics/MetricsCache/make_handler -
+# this is just the argparse wiring, folded in here alongside every
+# other subcommand's parsing tests since `serve` is no longer a
+# separate binary with its own parser.
+
+
+def test_serve_uses_global_device_and_fake_flags():
+    parser = cli.build_parser()
+    args = parser.parse_args(["--fake", "serve"])
+    assert args.fake is True
+    assert args.func is cli._cmd_serve
+
+
+def test_serve_enable_writes_defaults_to_off():
+    parser = cli.build_parser()
+    args = parser.parse_args(["--fake", "serve"])
+    assert args.enable_writes is False
+
+
+def test_resolve_serve_host_port_defaults_when_nothing_given():
+    from b6charger import httpd
+
+    parser = cli.build_parser()
+    args = parser.parse_args(["--fake", "serve"])
+    assert cli._resolve_serve_host_port(args) == (httpd.DEFAULT_HOST, httpd.DEFAULT_PORT)
+
+
+def test_resolve_serve_host_port_with_separate_host_and_port():
+    parser = cli.build_parser()
+    args = parser.parse_args(["--fake", "serve", "--host", "127.0.0.1", "--port", "1234"])
+    assert cli._resolve_serve_host_port(args) == ("127.0.0.1", 1234)
+
+
+def test_resolve_serve_host_port_with_host_only_keeps_default_port():
+    from b6charger import httpd
+
+    parser = cli.build_parser()
+    args = parser.parse_args(["--fake", "serve", "--host", "127.0.0.1"])
+    assert cli._resolve_serve_host_port(args) == ("127.0.0.1", httpd.DEFAULT_PORT)
+
+
+def test_resolve_serve_host_port_with_listen():
+    parser = cli.build_parser()
+    args = parser.parse_args(["--fake", "serve", "--listen", "0.0.0.0:1234"])
+    assert cli._resolve_serve_host_port(args) == ("0.0.0.0", 1234)
+
+
+def test_resolve_serve_host_port_with_listen_and_host_is_rejected(capsys):
+    parser = cli.build_parser()
+    args = parser.parse_args(
+        ["--fake", "serve", "--listen", "0.0.0.0:1234", "--host", "127.0.0.1"]
+    )
+    try:
+        cli._resolve_serve_host_port(args)
+        raised = False
+    except SystemExit as e:
+        raised = True
+        assert e.code == 2
+    assert raised
+    assert "cannot be combined" in capsys.readouterr().err
+
+
+def test_resolve_serve_host_port_with_listen_and_port_is_rejected(capsys):
+    parser = cli.build_parser()
+    args = parser.parse_args(["--fake", "serve", "--listen", "0.0.0.0:1234", "--port", "9999"])
+    try:
+        cli._resolve_serve_host_port(args)
+        raised = False
+    except SystemExit:
+        raised = True
+    assert raised
+    assert "cannot be combined" in capsys.readouterr().err

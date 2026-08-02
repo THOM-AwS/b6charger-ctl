@@ -1,5 +1,10 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""One daemon serving both read (metrics/status) and write (start/stop) HTTP endpoints.
+"""HTTP daemon internals for `b6ctl serve` - metrics plus optional start/stop control.
+
+Everything here is used by the `serve` subcommand in `cli.py`; there is
+no separate daemon binary or argument parser in this module - `b6ctl`
+is the only entry point, and `serve` is one more mode of it alongside
+`status`/`start`/`stop`/etc.
 
 Two independent safety levers, not one:
 
@@ -9,7 +14,7 @@ Two independent safety levers, not one:
 2. **Write capability** (`--enable-writes`) - OFF by default,
    regardless of bind address. Without it, `POST /start` and
    `POST /stop` return 403 immediately, before touching the device at
-   all. This daemon can sit on the network answering `/metrics` all
+   all. `b6ctl serve` can sit on the network answering `/metrics` all
    day with zero ability for anyone to command the charger, unless you
    deliberately started it with `--enable-writes`.
 
@@ -45,11 +50,10 @@ import json
 import logging
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 
 from b6charger import packs, protocol
 from b6charger.device import Device
-from b6charger.transport import FakeChargerTransport, HidRawTransport
 
 log = logging.getLogger("b6charger.httpd")
 
@@ -398,91 +402,3 @@ def make_handler(
             """Suppress BaseHTTPRequestHandler's default stderr access log."""
 
     return Handler
-
-
-def build_parser() -> argparse.ArgumentParser:
-    """Construct the `b6httpd` argument parser."""
-    p = argparse.ArgumentParser(prog="b6httpd")
-    p.add_argument("--host", default=None, help=f"interface to bind (default: {DEFAULT_HOST})")
-    p.add_argument(
-        "--port", type=int, default=None, help=f"port to bind (default: {DEFAULT_PORT})"
-    )
-    p.add_argument(
-        "--listen",
-        type=parse_listen_address,
-        default=None,
-        metavar="HOST:PORT",
-        help=(
-            "combined interface:port socket, e.g. --listen 0.0.0.0:9111 or "
-            "--listen [::1]:9111 for IPv6. Mutually exclusive with --host/--port"
-        ),
-    )
-    p.add_argument(
-        "--enable-writes",
-        action="store_true",
-        help="allow POST /start and POST /stop - without this, they return 403 "
-        "regardless of bind address. OFF by default.",
-    )
-    p.add_argument("--device", help="explicit /dev/hidrawN (default: auto-discover)")
-    p.add_argument("--fake", action="store_true")
-    p.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="with --enable-writes, log writes but send nothing",
-    )
-    p.add_argument(
-        "--cache-seconds",
-        type=float,
-        default=DEFAULT_CACHE_S,
-        help=f"reuse a rendered /metrics body for this many seconds "
-        f"(default: {DEFAULT_CACHE_S})",
-    )
-    return p
-
-
-def resolve_host_port(args: argparse.Namespace) -> tuple[str, int]:
-    """Work out the (host, port) to bind from parsed args.
-
-    --listen and --host/--port are mutually exclusive - exits with a
-    usage error (via ArgumentParser.error, so it looks like any other
-    argparse mistake) if both forms were given. Defaults to
-    DEFAULT_HOST:DEFAULT_PORT if neither is given.
-    """
-    if args.listen is not None and (args.host is not None or args.port is not None):
-        build_parser().error(
-            "--listen cannot be combined with --host/--port - use one or the other"
-        )
-    if args.listen is not None:
-        return args.listen
-    return (
-        args.host if args.host is not None else DEFAULT_HOST,
-        args.port if args.port is not None else DEFAULT_PORT,
-    )
-
-
-def main(argv: list[str] | None = None) -> None:
-    """Entry point for the `b6httpd` console script: parse args and serve forever."""
-    args = build_parser().parse_args(argv)
-    host, port = resolve_host_port(args)
-
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
-
-    transport = FakeChargerTransport() if args.fake else HidRawTransport(args.device)
-    device = Device(transport, dry_run=args.dry_run)
-    metrics_cache = MetricsCache(lambda: render_metrics(device), args.cache_seconds)
-
-    server = ThreadingHTTPServer(
-        (host, port), make_handler(device, metrics_cache, args.enable_writes)
-    )
-    log.info(
-        "listening on %s:%s (enable_writes=%s, dry_run=%s)",
-        host,
-        port,
-        args.enable_writes,
-        args.dry_run,
-    )
-    server.serve_forever()
-
-
-if __name__ == "__main__":
-    main()

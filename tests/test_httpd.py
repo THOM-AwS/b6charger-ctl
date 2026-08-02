@@ -1,8 +1,13 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Tests for b6httpd: argument handling, metrics rendering/caching, and the
---enable-writes gate on the write endpoints (tested against a real running
-server, not just the internal handler logic, since the actual HTTP status
-codes are the thing that matters here).
+"""Tests for b6charger.httpd: metrics rendering/caching, --listen parsing, and
+the --enable-writes gate on the write endpoints (tested against a real
+running server, not just the internal handler logic, since the actual HTTP
+status codes are the thing that matters here).
+
+Argument-parsing tests for the `serve` subcommand itself live in
+test_cli.py alongside every other subcommand - this module only covers
+httpd.py's internals (parse_listen_address, MetricsCache, render_metrics,
+make_handler), which have no argparse dependency of their own.
 """
 
 from __future__ import annotations
@@ -19,17 +24,14 @@ import pytest
 from b6charger.device import Device
 from b6charger.httpd import (
     DEFAULT_HOST,
-    DEFAULT_PORT,
     MetricsCache,
-    build_parser,
     make_handler,
     parse_listen_address,
     render_metrics,
-    resolve_host_port,
 )
 from b6charger.transport import FakeChargerTransport
 
-# --- --listen / --host / --port parsing -----------------------------
+# --- --listen parsing -----------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -61,52 +63,10 @@ def test_parse_listen_address_invalid(value):
         parse_listen_address(value)
 
 
-def test_resolve_host_port_defaults_when_nothing_given():
-    args = build_parser().parse_args(["--fake"])
-    assert resolve_host_port(args) == (DEFAULT_HOST, DEFAULT_PORT)
-
-
 def test_default_host_is_wide_open_by_design():
     # metrics/status are read-only and meant to be scrapeable - the write
     # endpoints are what --enable-writes exists to gate, independently.
     assert DEFAULT_HOST == "0.0.0.0"
-
-
-def test_resolve_host_port_with_separate_host_and_port():
-    args = build_parser().parse_args(["--fake", "--host", "127.0.0.1", "--port", "1234"])
-    assert resolve_host_port(args) == ("127.0.0.1", 1234)
-
-
-def test_resolve_host_port_with_host_only_keeps_default_port():
-    args = build_parser().parse_args(["--fake", "--host", "127.0.0.1"])
-    assert resolve_host_port(args) == ("127.0.0.1", DEFAULT_PORT)
-
-
-def test_resolve_host_port_with_listen():
-    args = build_parser().parse_args(["--fake", "--listen", "0.0.0.0:1234"])
-    assert resolve_host_port(args) == ("0.0.0.0", 1234)
-
-
-def test_resolve_host_port_with_listen_and_host_is_rejected(capsys):
-    args = build_parser().parse_args(
-        ["--fake", "--listen", "0.0.0.0:1234", "--host", "127.0.0.1"]
-    )
-    with pytest.raises(SystemExit) as exc_info:
-        resolve_host_port(args)
-    assert exc_info.value.code == 2
-    assert "cannot be combined" in capsys.readouterr().err
-
-
-def test_resolve_host_port_with_listen_and_port_is_rejected(capsys):
-    args = build_parser().parse_args(["--fake", "--listen", "0.0.0.0:1234", "--port", "9999"])
-    with pytest.raises(SystemExit):
-        resolve_host_port(args)
-    assert "cannot be combined" in capsys.readouterr().err
-
-
-def test_enable_writes_defaults_to_off():
-    args = build_parser().parse_args(["--fake"])
-    assert args.enable_writes is False
 
 
 # --- metrics rendering -------------------------------------------------
@@ -191,7 +151,7 @@ def test_metrics_cache_refreshes_after_expiry(monkeypatch):
 
 @pytest.fixture
 def running_server():
-    """Start a real b6httpd server (--fake charger) on an OS-assigned port.
+    """Start a real `serve` HTTP server (--fake charger) on an OS-assigned port.
 
     Yields (base_url, enable_writes_setter) - tests choose enable_writes
     per-case by constructing their own server, so this fixture is a

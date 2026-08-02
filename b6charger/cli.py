@@ -30,8 +30,9 @@ import argparse
 import json
 import logging
 import sys
+from http.server import ThreadingHTTPServer
 
-from b6charger import packs, protocol
+from b6charger import httpd, packs, protocol
 from b6charger.device import Device
 from b6charger.packs import Pack, PackConfigError
 from b6charger.transport import (
@@ -339,6 +340,53 @@ def _cmd_set_limits(args: argparse.Namespace) -> None:
     print("dry-run: would send SET commands above" if args.dry_run else "sent")
 
 
+def _resolve_serve_host_port(args: argparse.Namespace) -> tuple[str, int]:
+    """Work out the (host, port) `serve` should bind from parsed args.
+
+    --listen and --host/--port are mutually exclusive. Defaults to
+    httpd.DEFAULT_HOST:httpd.DEFAULT_PORT if neither form is given.
+    """
+    if args.listen is not None and (args.host is not None or args.port is not None):
+        print(
+            "error: --listen cannot be combined with --host/--port - " "use one or the other",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    if args.listen is not None:
+        return args.listen
+    return (
+        args.host if args.host is not None else httpd.DEFAULT_HOST,
+        args.port if args.port is not None else httpd.DEFAULT_PORT,
+    )
+
+
+def _cmd_serve(args: argparse.Namespace) -> None:
+    """Handle `b6ctl serve`: run the HTTP daemon forever.
+
+    Serves GET /metrics (Prometheus) and GET /status always; POST
+    /start and POST /stop only with --enable-writes (403 otherwise).
+    Uses the same --device/--fake as every other subcommand - this is
+    just another mode of the one program, not a separate tool with its
+    own flags for device selection.
+    """
+    host, port = _resolve_serve_host_port(args)
+    dev = Device(_make_transport(args), dry_run=args.dry_run)
+    metrics_cache = httpd.MetricsCache(lambda: httpd.render_metrics(dev), args.cache_seconds)
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", force=True)
+    server = ThreadingHTTPServer(
+        (host, port), httpd.make_handler(dev, metrics_cache, args.enable_writes)
+    )
+    log.info(
+        "listening on %s:%s (enable_writes=%s, dry_run=%s)",
+        host,
+        port,
+        args.enable_writes,
+        args.dry_run,
+    )
+    server.serve_forever()
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Construct the full `b6ctl` argument parser.
 
@@ -419,6 +467,48 @@ def build_parser() -> argparse.ArgumentParser:
     limits.add_argument("--temp-limit", type=int, help="20-80 C")
     limits.add_argument("--dry-run", action="store_true")
     limits.set_defaults(func=_cmd_set_limits)
+
+    serve = sub.add_parser(
+        "serve",
+        help="run the HTTP daemon forever: GET /metrics (Prometheus) + GET /status "
+        "always, POST /start + POST /stop only with --enable-writes",
+    )
+    serve.add_argument(
+        "--host", default=None, help=f"interface to bind (default: {httpd.DEFAULT_HOST})"
+    )
+    serve.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help=f"port to bind (default: {httpd.DEFAULT_PORT})",
+    )
+    serve.add_argument(
+        "--listen",
+        type=httpd.parse_listen_address,
+        default=None,
+        metavar="HOST:PORT",
+        help="combined interface:port socket, e.g. --listen 0.0.0.0:9111 or "
+        "--listen [::1]:9111 for IPv6. Mutually exclusive with --host/--port",
+    )
+    serve.add_argument(
+        "--enable-writes",
+        action="store_true",
+        help="allow POST /start and POST /stop - without this, they return 403 "
+        "regardless of bind address. OFF by default.",
+    )
+    serve.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="with --enable-writes, log writes but send nothing",
+    )
+    serve.add_argument(
+        "--cache-seconds",
+        type=float,
+        default=httpd.DEFAULT_CACHE_S,
+        help=f"reuse a rendered /metrics body for this many seconds "
+        f"(default: {httpd.DEFAULT_CACHE_S})",
+    )
+    serve.set_defaults(func=_cmd_serve)
 
     return p
 

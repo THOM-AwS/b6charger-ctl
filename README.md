@@ -68,9 +68,8 @@ cd b6charger-ctl
 pip install -e .
 ```
 
-This installs two commands: `b6ctl` (the CLI) and `b6httpd` (the
-optional HTTP wrapper). Try it immediately with zero risk, no hardware
-required:
+This installs one command, `b6ctl`. Try it immediately with zero risk,
+no hardware required:
 
 ```bash
 b6ctl --fake status
@@ -295,9 +294,12 @@ touch settings you didn't mention. Verify any change with
 
 ## HTTP API
 
-One daemon (`b6httpd`) serving both a Prometheus `/metrics` endpoint
-and control endpoints (`/start`, `/stop`) - fully self-contained in
-this repo, no external services required.
+`b6ctl serve` runs the same `b6ctl` binary as a long-running daemon,
+serving a Prometheus `/metrics` endpoint plus control endpoints
+(`/start`, `/stop`) - fully self-contained in this repo, no external
+services required, and no second binary to install: `serve` is one
+more subcommand alongside `status`/`start`/`stop`/etc, just one that
+doesn't exit.
 
 Two independent safety levers rather than one:
 
@@ -307,18 +309,22 @@ Two independent safety levers rather than one:
 - **Write capability** (`--enable-writes`) is **off by default,
   regardless of bind address**. Without it, `POST /start` and
   `POST /stop` return `403` immediately, before touching the device at
-  all - the daemon can sit on the network answering `/metrics` all day
-  with zero ability for anyone to command the charger, unless you
+  all - `b6ctl serve` can sit on the network answering `/metrics` all
+  day with zero ability for anyone to command the charger, unless you
   deliberately started it with `--enable-writes`.
 
 ```bash
-b6httpd                                          # metrics/status only - writes always 403
-b6httpd --enable-writes                          # also allow /start and /stop
-b6httpd --listen 0.0.0.0:9111 --enable-writes    # combined interface:port form
-b6httpd --listen [::1]:9111                      # IPv6 needs bracket notation
+b6ctl serve                                          # metrics/status only - writes always 403
+b6ctl serve --enable-writes                          # also allow /start and /stop
+b6ctl serve --listen 0.0.0.0:9111 --enable-writes    # combined interface:port form
+b6ctl serve --listen [::1]:9111                      # IPv6 needs bracket notation
 ```
 
-### `b6httpd` flags
+### `b6ctl serve` flags
+
+`--fake` and `--device` are the same global flags every other
+subcommand uses (see the flag tables above) - `serve` doesn't define
+its own copies.
 
 | Flag | Values | Default | Meaning |
 |---|---|---|---|
@@ -326,8 +332,6 @@ b6httpd --listen [::1]:9111                      # IPv6 needs bracket notation
 | `--port` | integer, 1-65535 | `9111` | Port to bind. Mutually exclusive with `--listen` |
 | `--listen` | `HOST:PORT`, e.g. `0.0.0.0:9111`; IPv6 as `[HOST]:PORT`, e.g. `[::1]:9111` | - | Combined interface+port in one flag. Mutually exclusive with `--host`/`--port` - use one form or the other |
 | `--enable-writes` | (boolean) | **off** | Allow `POST /start`/`POST /stop`. Without this, both return `403` regardless of bind address |
-| `--fake` | (boolean) | off | Use an in-memory simulated charger - no hardware touched at all |
-| `--device` | a path, e.g. `/dev/hidraw0` | auto-discover | Use a specific device instead of probing every `/dev/hidraw*` |
 | `--dry-run` | (boolean) | off | With `--enable-writes`, log writes but send nothing to the device |
 | `--cache-seconds` | float, seconds | `5.0` | How long a rendered `/metrics` body is reused before polling the device again |
 
@@ -337,6 +341,7 @@ b6httpd --listen [::1]:9111                      # IPv6 needs bracket notation
 GET  /metrics             -> Prometheus text format (always available)
 GET  /status               -> same fields as `b6ctl status --json` (always available)
 POST /start {"chemistry": "lipo", "cells": 3, "current_ma": 1500, "mode": "balance"}
+POST /start {"pack": "name", "current_ma": 1500}   # equivalent to `b6ctl start --pack`
 POST /stop
 ```
 
@@ -351,10 +356,12 @@ logged with the caller's address first.
 `GET_CHARGE_INFO`, it just wasn't decoded before. Point Prometheus (or
 `curl`) at `http://<host>:9111/metrics`.
 
-Note: unlike `b6ctl start --pack`, the HTTP `/start` endpoint doesn't
-support the `packs.toml` registry or its live cell-count cross-check -
-it takes a raw profile. If you build automation against it, consider
-porting that same safety check here first.
+`POST /start` with `{"pack": "name", ...}` is the HTTP equivalent of
+`b6ctl start --pack` - it runs the exact same live cell-count
+cross-check against `packs.toml` and returns `409` on a mismatch,
+instead of sending anything. A raw body (`{"chemistry", "cells",
+"current_ma", ...}`) skips that check, the same way manual
+`--chemistry`/`--cells` flags do on the CLI.
 
 ## Can this identify the battery automatically?
 

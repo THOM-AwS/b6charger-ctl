@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "b6charger-ctl"
-version = "0.3.1"
+version = "0.4.0"
 description = "Read/write control for SkyRC B6-family balance chargers (iMAX B6 / B6AC / B6 mini and rebadged clones)"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -13,7 +13,6 @@ dependencies = []
 
 [project.scripts]
 b6ctl = "b6charger.cli:main"
-b6httpd = "b6charger.httpd:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=7", "ruff>=0.6", "black>=24", "bandit>=1.7"]
