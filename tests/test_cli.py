@@ -106,3 +106,151 @@ def test_stop_dry_run(capsys):
     args = parser.parse_args(["--fake", "stop", "--dry-run"])
     args.func(args)
     assert "dry-run" in capsys.readouterr().out.lower()
+
+
+def _write_test_registry(tmp_path, monkeypatch) -> None:
+    """Point the CLI's default registry lookup at a throwaway packs.toml
+    with one 3S pack (matching FakeChargerTransport's 3-cell default) and
+    one 4S pack (deliberately mismatched, for the refusal test)."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "packs.toml").write_text("""
+        [[pack]]
+        name = "matches_fake"
+        description = "3S, matches FakeChargerTransport's default 3 cells"
+        chemistry = "lipo"
+        cells = 3
+        capacity_mah = 2200
+        default_current_ma = 1100
+
+        [[pack]]
+        name = "wrong_cell_count"
+        description = "4S - deliberately does not match the fake's 3 cells"
+        chemistry = "lihv"
+        cells = 4
+        capacity_mah = 1500
+        default_current_ma = 750
+        """)
+
+
+def test_packs_list_shows_configured_packs(tmp_path, monkeypatch, capsys):
+    _write_test_registry(tmp_path, monkeypatch)
+    parser = cli.build_parser()
+    args = parser.parse_args(["packs", "list"])
+    args.func(args)
+    out = capsys.readouterr().out
+    assert "matches_fake" in out
+    assert "wrong_cell_count" in out
+
+
+def test_packs_show_prints_full_pack_detail(tmp_path, monkeypatch, capsys):
+    _write_test_registry(tmp_path, monkeypatch)
+    parser = cli.build_parser()
+    args = parser.parse_args(["packs", "show", "matches_fake"])
+    args.func(args)
+    out = capsys.readouterr().out
+    assert "cells:              3S" in out
+    assert "chemistry:          lipo" in out
+
+
+def test_start_with_pack_using_default_current_succeeds(tmp_path, monkeypatch, capsys):
+    _write_test_registry(tmp_path, monkeypatch)
+    parser = cli.build_parser()
+    args = parser.parse_args(["--fake", "start", "--pack", "matches_fake", "--yes"])
+    args.func(args)
+    out = capsys.readouterr().out
+    assert "sent." in out
+    assert "cells        = 3" in out
+    assert "charge_current   = 1100mA" in out  # the pack's default_current_ma
+
+
+def test_start_with_pack_mismatched_cell_count_refuses(tmp_path, monkeypatch, capsys):
+    _write_test_registry(tmp_path, monkeypatch)
+    parser = cli.build_parser()
+    args = parser.parse_args(["--fake", "start", "--pack", "wrong_cell_count", "--yes"])
+    try:
+        args.func(args)
+        raised = False
+    except SystemExit as e:
+        raised = True
+        assert e.code == 1
+    assert raised
+    err = capsys.readouterr().err
+    assert "wrong_cell_count" in err
+    assert "4S" in err
+    assert "detects 3 real cell" in err
+
+
+def test_start_pack_current_override_above_max_is_rejected(tmp_path, monkeypatch, capsys):
+    _write_test_registry(tmp_path, monkeypatch)
+    parser = cli.build_parser()
+    args = parser.parse_args(
+        ["--fake", "start", "--pack", "matches_fake", "--current-ma", "50000", "--yes"]
+    )
+    try:
+        args.func(args)
+        raised = False
+    except SystemExit as e:
+        raised = True
+        assert e.code == 1
+    assert raised
+    assert "exceeds" in capsys.readouterr().err
+
+
+def test_start_combining_pack_and_chemistry_is_rejected(capsys):
+    parser = cli.build_parser()
+    args = parser.parse_args(
+        ["--fake", "start", "--pack", "whatever", "--chemistry", "lipo", "--yes"]
+    )
+    try:
+        args.func(args)
+        raised = False
+    except SystemExit as e:
+        raised = True
+        assert e.code == 1
+    assert raised
+    assert "cannot be combined" in capsys.readouterr().err
+
+
+def test_start_with_neither_pack_nor_manual_flags_is_rejected(capsys):
+    parser = cli.build_parser()
+    args = parser.parse_args(["--fake", "start", "--yes"])
+    try:
+        args.func(args)
+        raised = False
+    except SystemExit as e:
+        raised = True
+        assert e.code == 1
+    assert raised
+    assert "specify either --pack" in capsys.readouterr().err
+
+
+def test_start_manual_without_current_ma_is_rejected(capsys):
+    parser = cli.build_parser()
+    args = parser.parse_args(
+        ["--fake", "start", "--chemistry", "lipo", "--cells", "3", "--yes"]
+    )
+    try:
+        args.func(args)
+        raised = False
+    except SystemExit as e:
+        raised = True
+        assert e.code == 1
+    assert raised
+    assert "--current-ma is required" in capsys.readouterr().err
+
+
+def test_start_pack_dry_run_still_runs_the_cell_count_check(tmp_path, monkeypatch, capsys):
+    # --dry-run must not skip the safety check - it's a live read either
+    # way, and the whole point of --dry-run is telling the truth about
+    # what a real run would do.
+    _write_test_registry(tmp_path, monkeypatch)
+    parser = cli.build_parser()
+    args = parser.parse_args(["--fake", "start", "--pack", "wrong_cell_count", "--dry-run"])
+    try:
+        args.func(args)
+        raised = False
+    except SystemExit as e:
+        raised = True
+        assert e.code == 1
+    assert raised
+    assert "detects 3 real cell" in capsys.readouterr().err

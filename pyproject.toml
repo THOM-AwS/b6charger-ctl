@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "b6charger-ctl"
-version = "0.1.0"
+version = "0.2.0"
 description = "Read/write control for SkyRC B6-family balance chargers (iMAX B6 / B6AC / B6 mini and rebadged clones)"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = { text = "GPL-3.0-or-later" }
 dependencies = []
 
@@ -16,7 +16,7 @@ b6ctl = "b6charger.cli:main"
 b6httpd = "b6charger.httpd:main"
 
 [project.optional-dependencies]
-dev = ["pytest>=7"]
+dev = ["pytest>=7", "ruff>=0.6", "black>=24", "bandit>=1.7"]
 
 [tool.setuptools]
 packages = ["b6charger"]
@@ -24,3 +24,24 @@ packages = ["b6charger"]
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+
+[tool.black]
+line-length = 95
+target-version = ["py311"]
+
+[tool.ruff]
+line-length = 95
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "D"]
+ignore = [
+    "D203",  # conflicts with D211 (no-blank-line-before-class)
+    "D213",  # conflicts with D212 (multi-line-summary-first-line)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["D"]  # tests document themselves via their names
+
+[tool.bandit]
+exclude_dirs = ["tests"]

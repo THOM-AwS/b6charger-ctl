@@ -15,7 +15,8 @@ from b6charger import protocol
 def test_get_charge_info_frame_matches_known_good_bytes():
     # Independently verified against ht-infra's b6_poller.py, which has
     # sent this exact frame to a real Jaycar POWERTECH PLUS MB-3633.
-    assert protocol.build_get_charge_info() == bytes.fromhex("0f035500 55ffff".replace(" ", ""))
+    expected = bytes.fromhex("0f035500" "55ffff")
+    assert protocol.build_get_charge_info() == expected
 
 
 def test_stop_charging_frame_matches_known_good_bytes():
@@ -31,16 +32,7 @@ def test_start_charging_frame_matches_hand_traced_bytes():
     # end_voltage=4200(0x1068), no repeak/cycle bytes, trickle=0, 4
     # reserved bytes, checksum=0xDC.
     expected = bytes.fromhex(
-        "0f160500"
-        "000304"
-        "05dc"
-        "03e8"
-        "0c80"
-        "1068"
-        "0000"
-        "0000"
-        "00000000"
-        "dcffff"
+        "0f160500" "000304" "05dc" "03e8" "0c80" "1068" "0000" "0000" "00000000" "dcffff"
     )
     assert frame == expected
     assert len(frame) == 26

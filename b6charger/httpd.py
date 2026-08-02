@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Thin HTTP control surface next to ht-infra's read-only b6_poller
-exporter. Deliberately separate from that exporter (different port,
-different process) rather than folded in - a monitoring endpoint and a
-control endpoint have very different blast radii if either has a bug.
+"""Thin HTTP control surface next to ht-infra's read-only b6_poller exporter.
+
+Deliberately separate from that exporter (different port, different
+process) rather than folded in - a monitoring endpoint and a control
+endpoint have very different blast radii if either has a bug.
 
 Binds to 127.0.0.1 by default. Widening that is a real decision (this
 process can command a LiPo charger over the network) - pass --host
@@ -10,6 +11,11 @@ explicitly if you actually want that, don't default to it.
 
 Every write is logged before being sent, same as the CLI - this is the
 audit trail for "what did this thing tell the charger to do and when".
+
+Note: unlike the CLI, this doesn't currently support the packs.toml
+registry / cell-count cross-check - /start here takes a raw chemistry/
+cells/current body. If you build automation against this endpoint,
+consider porting that same safety check here first.
 """
 
 from __future__ import annotations
@@ -29,8 +35,18 @@ DEFAULT_PORT = 9111
 
 
 def make_handler(device: Device) -> type[BaseHTTPRequestHandler]:
+    """Build a BaseHTTPRequestHandler subclass bound to a specific `device`.
+
+    A class (not an instance) is what ThreadingHTTPServer expects; this
+    closure is the standard way to give every request handler access to
+    the same shared Device without using a global.
+    """
+
     class Handler(BaseHTTPRequestHandler):
+        """Handles one HTTP connection: GET /status, POST /start, POST /stop."""
+
         def _json(self, code: int, body: dict) -> None:
+            """Write `body` as a JSON response with the given status code."""
             payload = json.dumps(body).encode()
             self.send_response(code)
             self.send_header("Content-Type", "application/json")
@@ -38,7 +54,8 @@ def make_handler(device: Device) -> type[BaseHTTPRequestHandler]:
             self.end_headers()
             self.wfile.write(payload)
 
-        def do_GET(self) -> None:  # noqa: N802
+        def do_GET(self) -> None:  # noqa: N802 (stdlib API)
+            """Handle GET /status; anything else is a 404."""
             if self.path != "/status":
                 self._json(404, {"error": "not found"})
                 return
@@ -64,7 +81,8 @@ def make_handler(device: Device) -> type[BaseHTTPRequestHandler]:
                 },
             )
 
-        def do_POST(self) -> None:  # noqa: N802
+        def do_POST(self) -> None:  # noqa: N802 (stdlib API)
+            """Handle POST /start and POST /stop; anything else is a 404."""
             length = int(self.headers.get("Content-Length", 0))
             raw = self.rfile.read(length) if length else b"{}"
             try:
@@ -110,13 +128,14 @@ def make_handler(device: Device) -> type[BaseHTTPRequestHandler]:
 
             self._json(404, {"error": "not found"})
 
-        def log_message(self, *args) -> None:  # quiet the default access log
-            pass
+        def log_message(self, *args) -> None:
+            """Suppress BaseHTTPRequestHandler's default stderr access log."""
 
     return Handler
 
 
 def main(argv: list[str] | None = None) -> None:
+    """Entry point for the `b6httpd` console script: parse args and serve forever."""
     p = argparse.ArgumentParser(prog="b6httpd")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=DEFAULT_PORT)

@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Wire protocol for SkyRC B6-family balance chargers (iMAX B6 / B6AC /
-B6 mini and rebadged clones, e.g. Jaycar POWERTECH PLUS MB-3633 / JMB-3633).
+"""Wire protocol for SkyRC B6-family balance chargers.
 
-Frame layout, reverse-engineered by maciek134/libb6 (GPL-3) and confirmed
-here against a live Jaycar POWERTECH PLUS MB-3633 for the read path:
+Covers iMAX B6 / B6AC / B6 mini and rebadged clones (e.g. Jaycar
+POWERTECH PLUS MB-3633 / JMB-3633). Frame layout, reverse-engineered by
+maciek134/libb6 (GPL-3) and confirmed here against a live Jaycar
+POWERTECH PLUS MB-3633 for the read path:
 
     [0x0F, LEN, CMD, 0x00, ...PAYLOAD..., CHECKSUM, 0xFF, 0xFF]
 
@@ -39,6 +40,8 @@ from enum import IntEnum
 
 
 class Cmd(IntEnum):
+    """Top-level command bytes (frame byte index 2) for simple, no-payload commands."""
+
     GET_DEV_INFO = 0x57
     GET_SYS_INFO = 0x5A
     GET_CHARGE_INFO = 0x55
@@ -60,6 +63,8 @@ START_CHARGING_CMD = 0x05
 
 
 class ChargingModeLi(IntEnum):
+    """Charging mode for lithium chemistries (LiPo/LiIon/LiFe/LiHV)."""
+
     STANDARD = 0x00
     DISCHARGE = 0x01
     STORAGE = 0x02
@@ -68,6 +73,8 @@ class ChargingModeLi(IntEnum):
 
 
 class ChargingModeNi(IntEnum):
+    """Charging mode for NiMH/NiCd."""
+
     STANDARD = 0x00
     AUTO = 0x01
     DISCHARGE = 0x02
@@ -76,11 +83,15 @@ class ChargingModeNi(IntEnum):
 
 
 class ChargingModePb(IntEnum):
+    """Charging mode for lead-acid (Pb)."""
+
     CHARGE = 0x00
     DISCHARGE = 0x01
 
 
 class BatteryType(IntEnum):
+    """Battery chemistry, as sent in a START_CHARGING profile."""
+
     LIPO = 0x00
     LIION = 0x01
     LIFE = 0x02
@@ -91,6 +102,7 @@ class BatteryType(IntEnum):
 
     @property
     def is_lithium(self) -> bool:
+        """Whether this chemistry uses ChargingModeLi (LiPo/LiIon/LiFe/LiHV)."""
         return self in (
             BatteryType.LIPO,
             BatteryType.LIION,
@@ -100,15 +112,19 @@ class BatteryType(IntEnum):
 
     @property
     def is_nickel(self) -> bool:
+        """Whether this chemistry uses ChargingModeNi (NiMH/NiCd)."""
         return self in (BatteryType.NIMH, BatteryType.NICD)
 
 
 class State(IntEnum):
-    """Per libb6's Enum.hh. NOTE: ht-infra's b6_poller.py currently
-    labels state 4 as "idle" - this enum (the only source that's been
-    read directly, rather than inferred from panel behaviour) says 4 is
-    a SECOND error state, not idle. Unverified which is correct on this
-    specific clone's firmware; see README.md "STATE 4 discrepancy"."""
+    """Charger state, as reported in GET_CHARGE_INFO's state byte.
+
+    Per libb6's Enum.hh. NOTE: ht-infra's b6_poller.py currently labels
+    state 4 as "idle" - this enum (the only source that's been read
+    directly, rather than inferred from panel behaviour) says 4 is a
+    SECOND error state, not idle. Unverified which is correct on this
+    specific clone's firmware; see README.md's "STATE 4 discrepancy".
+    """
 
     CHARGING = 1
     ERROR_1 = 2
@@ -117,6 +133,8 @@ class State(IntEnum):
 
 
 class Error(IntEnum):
+    """Error codes returned alongside an ERROR_1/ERROR_2 state, per Enum.hh."""
+
     CONNECTION_BROKEN_1 = 0x000B
     CELL_VOLTAGE_INVALID = 0x000C
     BALANCE_CONNECTION = 0x000D
@@ -143,49 +161,65 @@ class Error(IntEnum):
 
 
 class ProtocolError(Exception):
-    pass
+    """A frame couldn't be built or parsed - bad input, or an unexpected response."""
 
 
 def checksum_trailer(payload_from_cmd: bytes) -> bytes:
-    """payload_from_cmd is everything from the CMD byte onward (i.e. the
-    frame with the leading [0x0F, LEN] stripped). Mirrors libb6
-    Packet::writeChecksum(), which sums from buffer index 2 onward."""
+    """Compute the 3-byte checksum trailer for a frame.
+
+    `payload_from_cmd` is everything from the CMD byte onward (i.e. the
+    frame with the leading [0x0F, LEN] stripped). Mirrors libb6's
+    Packet::writeChecksum(), which sums from buffer index 2 onward.
+    """
     total = sum(payload_from_cmd) & 0xFF
     return bytes([total, 0xFF, 0xFF])
 
 
 def _simple_frame(cmd: int) -> bytes:
+    """Build a no-payload command frame: [0x0F, 0x03, cmd, 0x00, checksum...]."""
     body = bytes([0x0F, 0x03, cmd, 0x00])
     return body + checksum_trailer(body[2:])
 
 
 def build_get_dev_info() -> bytes:
+    """Build a GET_DEV_INFO request frame."""
     return _simple_frame(Cmd.GET_DEV_INFO)
 
 
 def build_get_sys_info() -> bytes:
+    """Build a GET_SYS_INFO request frame."""
     return _simple_frame(Cmd.GET_SYS_INFO)
 
 
 def build_get_charge_info() -> bytes:
+    """Build a GET_CHARGE_INFO request frame."""
     return _simple_frame(Cmd.GET_CHARGE_INFO)
 
 
 def build_stop_charging() -> bytes:
+    """Build a STOP_CHARGING request frame."""
     return _simple_frame(Cmd.STOP_CHARGING)
 
 
 def build_unk1() -> bytes:
+    """Build a request frame for the UNK1 (0x5F) command.
+
+    Purpose undocumented in libb6 beyond "sent before startCharging to
+    check if a charge is already in progress" - exposed here for
+    completeness, not currently used by device.py.
+    """
     return _simple_frame(Cmd.UNK1)
 
 
 def _u16(val: int) -> bytes:
+    """Encode `val` as a big-endian u16, raising ProtocolError if out of range."""
     if not 0 <= val <= 0xFFFF:
         raise ProtocolError(f"value {val} out of u16 range")
     return bytes([(val >> 8) & 0xFF, val & 0xFF])
 
 
 def _set_system_frame(param_id: int, value_bytes: bytes) -> bytes:
+    """Build a SET_SYSTEM (0x11) frame for one parameter and its value bytes."""
     payload = bytes([0x00]) + value_bytes
     length = len(payload) + 3
     header = bytes([0x0F, length, 0x11, param_id])
@@ -194,12 +228,14 @@ def _set_system_frame(param_id: int, value_bytes: bytes) -> bytes:
 
 
 def build_set_cycle_time(cycle_time: int) -> bytes:
+    """Build a frame setting the cycle count (1-60) for cyclic charge/discharge."""
     if not 1 <= cycle_time <= 60:
         raise ProtocolError("cycle_time must be 1-60")
     return _set_system_frame(SetSystemParam.CYCLE_TIME, bytes([cycle_time]))
 
 
 def build_set_time_limit(enabled: bool, limit_minutes: int) -> bytes:
+    """Build a frame setting the charge time-limit safety cutoff (1-720 minutes)."""
     if not 1 <= limit_minutes <= 720:
         raise ProtocolError("limit_minutes must be 1-720")
     return _set_system_frame(
@@ -208,6 +244,7 @@ def build_set_time_limit(enabled: bool, limit_minutes: int) -> bytes:
 
 
 def build_set_capacity_limit(enabled: bool, limit_mah: int) -> bytes:
+    """Build a frame setting the charge capacity-limit safety cutoff (100-50000mAh)."""
     if not 100 <= limit_mah <= 50000:
         raise ProtocolError("limit_mah must be 100-50000")
     return _set_system_frame(
@@ -216,22 +253,27 @@ def build_set_capacity_limit(enabled: bool, limit_mah: int) -> bytes:
 
 
 def build_set_temp_limit(limit_celsius: int) -> bytes:
+    """Build a frame setting the internal temperature cutoff (20-80C)."""
     if not 20 <= limit_celsius <= 80:
         raise ProtocolError("limit_celsius must be 20-80")
     return _set_system_frame(SetSystemParam.TEMP_LIMIT, bytes([limit_celsius]))
 
 
 def build_set_buzzers(key: bool, system: bool) -> bytes:
+    """Build a frame enabling/disabling the key-press and system buzzers."""
     return _set_system_frame(SetSystemParam.BUZZERS, bytes([int(key), int(system)]))
 
 
 @dataclass(frozen=True)
 class ChargeProfile:
-    """Mirrors libb6's ChargeProfile struct. Construct via the chemistry
-    helpers below rather than directly, unless you know exactly what
-    you're doing - endVoltage/cellDischargeVoltage are in millivolts
-    PER CELL and an incorrect value is exactly the failure mode this
-    project exists to prevent, not create."""
+    """The full profile sent in a START_CHARGING command.
+
+    Mirrors libb6's ChargeProfile struct. Construct via the chemistry
+    helpers below (e.g. `lipo_profile`) rather than directly, unless you
+    know exactly what you're doing - endVoltage/cellDischargeVoltage are
+    in millivolts PER CELL, and an incorrect value here is exactly the
+    failure mode this project exists to prevent, not create.
+    """
 
     battery_type: BatteryType
     cell_count: int
@@ -248,6 +290,7 @@ class ChargeProfile:
     cycle_count: int = 1
 
     def __post_init__(self) -> None:
+        """Validate cell count and that the mode matching this chemistry was set."""
         if not 1 <= self.cell_count <= 16:
             raise ProtocolError("cell_count must be 1-16")
         if self.battery_type.is_lithium and self.mode_li is None:
@@ -286,7 +329,7 @@ def lipo_profile(
     hv: bool = False,
     discharge_current_ma: int = DEFAULT_DISCHARGE_CURRENT_MA,
 ) -> ChargeProfile:
-    """Standard LiPo (4.20V/cell) or LiHV (4.35V/cell) profile."""
+    """Build a standard LiPo (4.20V/cell) or LiHV (4.35V/cell) charge profile."""
     bt = BatteryType.LIHV if hv else BatteryType.LIPO
     return ChargeProfile(
         battery_type=bt,
@@ -300,18 +343,27 @@ def lipo_profile(
 
 
 def build_start_charging(profile: ChargeProfile) -> bytes:
+    """Build the START_CHARGING request frame for a given ChargeProfile."""
     payload = bytearray()
     payload.append(profile.battery_type)
     payload.append(profile.cell_count)
 
+    # ChargeProfile.__post_init__ already enforces these, but that check
+    # is bypassable if a profile is ever mutated via object.__setattr__
+    # (frozen dataclasses can be) - re-checking here with real
+    # exceptions rather than `assert` means the guarantee survives
+    # running under `python -O`, which strips assertions.
     if profile.battery_type.is_lithium:
-        assert profile.mode_li is not None
+        if profile.mode_li is None:
+            raise ProtocolError("lithium battery types require mode_li")
         payload.append(profile.mode_li)
     elif profile.battery_type.is_nickel:
-        assert profile.mode_ni is not None
+        if profile.mode_ni is None:
+            raise ProtocolError("NiMH/NiCd require mode_ni")
         payload.append(profile.mode_ni)
     else:
-        assert profile.mode_pb is not None
+        if profile.mode_pb is None:
+            raise ProtocolError("Pb requires mode_pb")
         payload.append(profile.mode_pb)
 
     payload += _u16(profile.charge_current_ma)
@@ -341,6 +393,8 @@ def build_start_charging(profile: ChargeProfile) -> bytes:
 
 @dataclass(frozen=True)
 class ChargeInfo:
+    """Decoded GET_CHARGE_INFO response: live charge telemetry."""
+
     state: int
     capacity_mah: int
     time_s: int
@@ -353,6 +407,7 @@ class ChargeInfo:
 
     @property
     def state_name(self) -> str:
+        """Human-readable State name, or "UNKNOWN(n)" for an unrecognised value."""
         try:
             return State(self.state).name
         except ValueError:
@@ -370,10 +425,16 @@ CELL_MAX_MV = 4400  # above this it's noise on a floating balance pin, not a
 
 
 def _is_real_cell(mv: int) -> bool:
+    """Whether a raw cell-slot reading is plausibly a real, connected cell."""
     return CELL_MIN_MV <= mv <= CELL_MAX_MV
 
 
 def parse_charge_info(resp: bytes) -> ChargeInfo:
+    """Parse a GET_CHARGE_INFO response frame into a ChargeInfo.
+
+    Raises ProtocolError if `resp` isn't shaped like a GET_CHARGE_INFO
+    response at all (wrong length or command byte).
+    """
     if len(resp) < 33 or resp[0] != 0x0F or resp[2] != Cmd.GET_CHARGE_INFO:
         raise ProtocolError(f"not a GET_CHARGE_INFO response: {resp[:8].hex()}")
 
@@ -396,10 +457,13 @@ def parse_charge_info(resp: bytes) -> ChargeInfo:
 
 @dataclass(frozen=True)
 class SysInfo:
-    """Mirrors libb6's SysInfo struct - the currently-configured system
-    settings, as opposed to ChargeInfo's live-charge telemetry. This is
-    the only way to verify a set_* write actually took effect without
-    relying on finding the right screen on the front panel."""
+    """Decoded GET_SYS_INFO response: currently-configured system settings.
+
+    Mirrors libb6's SysInfo struct - as opposed to ChargeInfo's live-
+    charge telemetry, this is the only way to verify a set_* write
+    actually took effect without relying on finding the right screen on
+    the front panel.
+    """
 
     cycle_time: int
     time_limit_on: bool
@@ -415,6 +479,11 @@ class SysInfo:
 
 
 def parse_sys_info(resp: bytes) -> SysInfo:
+    """Parse a GET_SYS_INFO response frame into a SysInfo.
+
+    Raises ProtocolError if `resp` isn't shaped like a GET_SYS_INFO
+    response at all (wrong length or command byte).
+    """
     if len(resp) < 36 or resp[0] != 0x0F or resp[2] != Cmd.GET_SYS_INFO:
         raise ProtocolError(f"not a GET_SYS_INFO response: {resp[:8].hex()}")
 

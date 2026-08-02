@@ -1,0 +1,22 @@
+# Optional but recommended: catches lint/format/security issues before
+# they reach CI. Install once with:
+#   pip install -e ".[dev]" pre-commit
+#   pre-commit install
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.6.9
+    hooks:
+      - id: ruff
+        args: [--fix]
+
+  - repo: https://github.com/psf/black
+    rev: 24.10.0
+    hooks:
+      - id: black
+
+  - repo: https://github.com/PyCQA/bandit
+    rev: 1.7.10
+    hooks:
+      - id: bandit
+        args: ["-r", "b6charger/"]
+        pass_filenames: false

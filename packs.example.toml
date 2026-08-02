@@ -1,0 +1,67 @@
+# b6charger-ctl pack registry - EXAMPLE / TEMPLATE FILE.
+#
+# The one pack defined below is a harmless placeholder, not a real
+# battery. This file is committed to the repo so a fresh checkout works
+# out of the box (b6ctl falls back to it automatically) without ever
+# shipping anyone's real battery details.
+#
+# TO CONFIGURE YOUR OWN BATTERIES:
+#
+#   1. Copy this file:  cp packs.example.toml packs.toml
+#   2. Edit packs.toml to describe YOUR packs (one [[pack]] block each).
+#   3. That's it - packs.toml is gitignored, b6ctl prefers it over this
+#      example file automatically, and it never leaves your machine.
+#
+# WHERE TO GET THE NUMBERS: every field below is printed on the battery
+# itself (or its retailer listing). You are not guessing or measuring
+# anything - you're transcribing what's already on the label.
+#
+# FIELD REFERENCE
+# ----------------
+#   name              Short identifier, no spaces - this is what you type
+#                      as `b6ctl start --pack NAME`. Lowercase letters,
+#                      numbers, underscores recommended (e.g. "zeee2200").
+#
+#   description        Free text - whatever helps YOU recognise the pack
+#                      (brand, size, what it's for). Not used for safety
+#                      checks, purely a label.
+#
+#   chemistry          "lipo" for a standard LiPo/LiIon/LiFe pack (charges
+#                      to 4.20V/cell), or "lihv" for a High-Voltage pack
+#                      (charges to 4.35V/cell). THIS IS THE MOST IMPORTANT
+#                      FIELD - it's usually printed right on the pack
+#                      ("LiPo", "LiHV", "HV", or a max cell voltage of
+#                      4.35V rather than 4.20V). If you're not sure, use
+#                      "lipo" - charging a standard pack on the lipo
+#                      profile is always safe (if suboptimal); charging a
+#                      standard pack on the lihv profile is NOT safe.
+#
+#   cells              The "S" number printed on the pack (3S = 3, 4S = 4,
+#                      etc). b6ctl will refuse to start a charge if the
+#                      charger detects a different number of real cells
+#                      actually connected than this - that check is the
+#                      whole reason this file exists rather than just
+#                      typing flags by hand every time.
+#
+#   capacity_mah        The mAh rating printed on the pack.
+#
+#   default_current_ma  The charge current b6ctl uses when you don't pass
+#                      --current-ma explicitly. 0.5C (half the capacity,
+#                      in mA) is a safe, gentle default - e.g. 1000 for a
+#                      2000mAh pack. You can always override per-charge
+#                      with --current-ma.
+#
+#   max_current_ma      OPTIONAL hard ceiling for this pack. Defaults to
+#                      1C (the capacity_mah value) if omitted. b6ctl will
+#                      refuse anything above whichever is lower, and will
+#                      never let this exceed 1C even if you set it higher
+#                      here - that ceiling is enforced in code, not just
+#                      in this file.
+
+[[pack]]
+name = "example_pack"
+description = "REPLACE ME - this is a placeholder, not a real battery"
+chemistry = "lipo"
+cells = 1
+capacity_mah = 1000
+default_current_ma = 500

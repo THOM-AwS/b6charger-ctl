@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""HID transport for talking to the charger, plus a fake implementation
-for testing the whole stack with no hardware attached.
+"""HID transport for talking to the charger.
+
+Also provides a fake implementation for testing the whole stack with no
+hardware attached.
 
 Lesson from the first real hardware test (2026-08-02, see DRY_RUN.md):
 a `stop` sent seconds after a successful one hung forever. Two design
@@ -35,19 +37,32 @@ from typing import Protocol
 from b6charger import protocol
 
 DEFAULT_TIMEOUT_S = 3.0
-DEFAULT_LOCK_PATH = "/tmp/b6charger-ctl.lock"
+# /tmp is shared across all local users, which normally makes a fixed
+# path there a symlink-attack risk (CWE-377: another user could
+# pre-create a symlink at this path pointing somewhere sensitive).
+# Mitigated in HidRawTransport.transact() by opening with O_NOFOLLOW,
+# which refuses to follow a symlink rather than silently opening
+# through it - kept as a fixed /tmp path (rather than a per-user
+# XDG_RUNTIME_DIR) since this tool's target environment is a
+# single-purpose device (e.g. a Pi wired to one charger) with one
+# operator account, not a shared multi-user host.
+DEFAULT_LOCK_PATH = "/tmp/b6charger-ctl.lock"  # nosec B108
 
 
 class DeviceTimeout(Exception):
-    pass
+    """No response arrived from the device within the transport's timeout."""
 
 
 class NoChargerFound(Exception):
-    pass
+    """No /dev/hidraw* device answered a GET_CHARGE_INFO probe during discovery."""
 
 
 class Transport(Protocol):
-    def transact(self, frame: bytes, n: int = 64) -> bytes: ...
+    """Minimal interface Device needs: send a frame, get the response back."""
+
+    def transact(self, frame: bytes, n: int = 64) -> bytes:
+        """Send `frame` and return up to `n` bytes of the device's response."""
+        ...
 
 
 class HidRawTransport:
@@ -59,12 +74,14 @@ class HidRawTransport:
         timeout_s: float = DEFAULT_TIMEOUT_S,
         lock_path: str = DEFAULT_LOCK_PATH,
     ) -> None:
+        """Open (or auto-discover, if `device_path` is None) the charger's hidraw device."""
         self._path = device_path or self._discover(timeout_s)
         self._timeout_s = timeout_s
         self._lock_path = lock_path
 
     @staticmethod
     def _discover(timeout_s: float) -> str:
+        """Probe every /dev/hidraw* with GET_CHARGE_INFO, returning the first to answer."""
         for dev in sorted(glob.glob("/dev/hidraw*")):
             try:
                 resp = HidRawTransport._raw_transact(
@@ -78,6 +95,13 @@ class HidRawTransport:
 
     @staticmethod
     def _raw_transact(path: str, frame: bytes, timeout_s: float, n: int = 64) -> bytes:
+        """Open `path`, write `frame`, wait up to `timeout_s` for a reply, and close.
+
+        This exact open -> write -> select -> read -> close sequence on
+        ONE file descriptor is the pattern proven reliable against real
+        hardware (see the module docstring) - don't split it across
+        separate opens.
+        """
         fd = os.open(path, os.O_RDWR)
         try:
             os.write(fd, frame)
@@ -93,7 +117,17 @@ class HidRawTransport:
             os.close(fd)
 
     def transact(self, frame: bytes, n: int = 64) -> bytes:
-        lock_fd = os.open(self._lock_path, os.O_CREAT | os.O_RDWR, 0o666)
+        """Send `frame` and return the response, serialized against other b6ctl calls.
+
+        Holds an flock for the duration so two `b6ctl` invocations running
+        close together can't interleave their open/write/read/close
+        sequences on the same device (see the module docstring for why
+        that matters).
+        """
+        # O_NOFOLLOW refuses to open through a pre-existing symlink at this
+        # path rather than silently following it - the actual mitigation
+        # for the /tmp shared-path risk noted on DEFAULT_LOCK_PATH above.
+        lock_fd = os.open(self._lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o666)
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_EX)
             return self._raw_transact(self._path, frame, self._timeout_s, n)
@@ -103,16 +137,20 @@ class HidRawTransport:
 
 
 class FakeChargerTransport:
-    """Simulates enough charger behaviour to exercise the whole
-    protocol/device/CLI stack without hardware. NOT a claim that this
-    matches real firmware timing or edge-case behaviour - it exists so
-    frame encoding, response parsing, and the CLI/HTTP plumbing can be
-    tested before a real command is sent, and it deliberately has no
-    timing/concurrency quirks of its own (those are exactly what real
-    hardware testing is for - see DRY_RUN.md).
+    """A simulated charger for exercising the whole stack without hardware.
+
+    Tracks both live charge state (cells/current/state) and system
+    settings (limits/buzzers), and updates them the way the real
+    protocol implies a real charger would in response to writes. NOT a
+    claim that this matches real firmware timing or edge-case behaviour
+    - it exists so frame encoding, response parsing, and the CLI/HTTP
+    plumbing can be tested before a real command is sent. It
+    deliberately has no timing/concurrency quirks of its own (those are
+    exactly what real hardware testing is for - see DRY_RUN.md).
     """
 
     def __init__(self) -> None:
+        """Start in a plausible at-rest state: a complete, healthy, idle 3S pack."""
         self.state = protocol.State.COMPLETE
         self.cells_mv = (3800, 3805, 3798)
         self.current_ma = 0
@@ -135,6 +173,7 @@ class FakeChargerTransport:
         self.temp_limit_c = 50
 
     def write(self, frame: bytes) -> None:
+        """Apply a command frame's effect to the simulated charger's state."""
         self._last_write = frame
         cmd = frame[2]
         if cmd == protocol.Cmd.STOP_CHARGING:
@@ -162,6 +201,7 @@ class FakeChargerTransport:
                 self.temp_limit_c = frame[5]
 
     def read(self, n: int = 64) -> bytes:
+        """Return the response appropriate to the most recent write()."""
         cmd = self._last_write[2] if self._last_write else protocol.Cmd.GET_CHARGE_INFO
         if cmd == protocol.Cmd.GET_SYS_INFO:
             return self._encode_sys_info()
@@ -173,10 +213,12 @@ class FakeChargerTransport:
         return bytes(64)
 
     def transact(self, frame: bytes, n: int = 64) -> bytes:
+        """Apply `frame` (via write()) and return the resulting response (via read())."""
         self.write(frame)
         return self.read(n)
 
     def _encode_charge_info(self) -> bytes:
+        """Encode current state as a GET_CHARGE_INFO response frame."""
         buf = bytearray(64)
         buf[0] = 0x0F
         buf[2] = protocol.Cmd.GET_CHARGE_INFO
@@ -193,6 +235,7 @@ class FakeChargerTransport:
         return bytes(buf)
 
     def _encode_sys_info(self) -> bytes:
+        """Encode current settings as a GET_SYS_INFO response frame."""
         buf = bytearray(64)
         buf[0] = 0x0F
         buf[2] = protocol.Cmd.GET_SYS_INFO

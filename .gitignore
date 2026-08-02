@@ -5,3 +5,6 @@ __pycache__/
 .venv/
 build/
 dist/
+
+# your real battery roster - never committed, see packs.example.toml
+packs.toml
