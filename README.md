@@ -41,6 +41,7 @@ and current. Read the **Safety** section below before your first real
 - [Configure your batteries](#configure-your-batteries)
 - [Command reference](#command-reference)
 - [HTTP API](#http-api)
+- [Grafana dashboard](#grafana-dashboard)
 - [Can this identify the battery automatically?](#can-this-identify-the-battery-automatically)
 - [Protocol notes](#protocol-notes--findings-worth-knowing-about)
 - [Safety](#safety)
@@ -428,6 +429,30 @@ cells, mode, pack}`, `charger_last_commanded_timestamp_seconds`, and
 `charger_last_commanded_current_milliamps` whenever a `start` has ever
 been sent - see "Can this identify the battery automatically?" below
 for why this exists and what it does and doesn't mean.
+
+## Grafana dashboard
+
+[`grafana/dashboard.json`](grafana/dashboard.json) is a ready-to-import
+starter dashboard for everything `/metrics` exposes - state (as both a
+current-value panel and a line graph over time), pack/per-cell
+voltage, cell balance, charge current, capacity delivered, internal
+temperature, and the configured safety cutoffs.
+
+To import it: Grafana → Dashboards → New → Import → upload the file (or
+paste its contents). It uses a datasource **template variable**
+(`DS_PROMETHEUS`), not a hardcoded datasource UID, so Grafana will
+prompt you to pick your own Prometheus datasource on import rather
+than requiring you to hand-edit the JSON first.
+
+It assumes the metric names this README documents above, scraped from
+`b6ctl serve`'s `/metrics` - point your Prometheus (or Grafana Cloud
+agent) at it the same way described in [HTTP API](#http-api) and the
+panels should populate without further changes. The `State` panel's
+value mapping and the `Pack voltage`/`Per-cell voltage` panels'
+`charger_sysinfo_*` queries assume the same `IDLE`=2/`CHARGING`=1/
+`COMPLETE`=3/`ERROR`=4 numbering this project uses - see
+[Protocol notes](#protocol-notes--findings-worth-knowing-about) if
+you're adapting this for a fork with different state values.
 
 ## Can this identify the battery automatically?
 
