@@ -81,6 +81,22 @@ DEFAULT_HOST = "0.0.0.0"  # nosec B104
 DEFAULT_PORT = 9111
 DEFAULT_CACHE_S = 5.0
 
+#: Hard ceiling on a POST body's Content-Length, checked before reading
+#: any of it. The largest legitimate body here (a raw or pack-based
+#: start request) is a few hundred bytes of JSON - 4KB leaves generous
+#: headroom without letting a client (malicious or just buggy) make
+#: this daemon buffer an arbitrarily large body in memory.
+MAX_BODY_BYTES = 4096
+
+#: Per-request socket timeout (StreamRequestHandler's own `timeout`
+#: class attribute - http.server.BaseHTTPRequestHandler already
+#: catches socket.timeout around a request and closes the connection
+#: cleanly, see handle_one_request()). Without this, a client that
+#: connects but sends data slowly or not at all ties up one of
+#: ThreadingHTTPServer's threads indefinitely - this bounds that to a
+#: generous but finite window.
+REQUEST_TIMEOUT_S = 10.0
+
 #: Environment variable holding the bearer token POST /start and /stop
 #: require once --enable-writes is set (see module docstring). Read by
 #: cli.py's _cmd_serve at startup, not by this module directly - kept
@@ -380,6 +396,12 @@ def make_handler(
     class Handler(BaseHTTPRequestHandler):
         """Handles one connection: GET /metrics, GET /status, POST /start, POST /stop."""
 
+        #: See REQUEST_TIMEOUT_S - bounds how long a slow/hanging client
+        #: can occupy a thread. StreamRequestHandler's own attribute;
+        #: http.server catches the resulting socket.timeout and closes
+        #: the connection, it doesn't crash the handler.
+        timeout = REQUEST_TIMEOUT_S
+
         def _json(self, code: int, body: dict) -> None:
             """Write `body` as a JSON response with the given status code."""
             payload = json.dumps(body).encode()
@@ -478,7 +500,16 @@ def make_handler(
                 )
                 return
 
-            length = int(self.headers.get("Content-Length", 0))
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+            except ValueError:
+                self._json(400, {"error": "invalid Content-Length header"})
+                return
+            if length > MAX_BODY_BYTES:
+                self._json(
+                    413, {"error": f"body too large ({length} bytes, max {MAX_BODY_BYTES})"}
+                )
+                return
             raw = self.rfile.read(length) if length else b"{}"
             try:
                 body = json.loads(raw or b"{}")

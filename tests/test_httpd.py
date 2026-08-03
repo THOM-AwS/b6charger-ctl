@@ -654,6 +654,43 @@ def test_write_endpoints_ignore_token_header_when_no_token_configured(running_se
         assert resp.status == 200
 
 
+def test_post_start_rejects_oversized_body_with_413(running_server):
+    from b6charger.httpd import MAX_BODY_BYTES
+
+    base_url = running_server(enable_writes=True)
+    # a large-but-valid-shaped JSON body - the point is the size ceiling
+    # triggers before any parsing, not that the content itself is bad.
+    oversized = json.dumps(
+        {"chemistry": "lipo", "cells": 3, "current_ma": 1500, "padding": "x" * MAX_BODY_BYTES}
+    ).encode()
+    req = urllib.request.Request(f"{base_url}/start", data=oversized, method="POST")
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        urllib.request.urlopen(req)
+    assert exc_info.value.code == 413
+
+
+def test_post_start_rejects_invalid_content_length_header(running_server):
+    base_url = running_server(enable_writes=True)
+    req = urllib.request.Request(f"{base_url}/start", data=b"{}", method="POST")
+    req.add_header("Content-Length", "not-a-number")
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        urllib.request.urlopen(req)
+    assert exc_info.value.code == 400
+
+
+def test_handler_has_a_finite_socket_timeout():
+    # Regression: without Handler.timeout set, a client that connects
+    # but sends data slowly (or never) ties up a ThreadingHTTPServer
+    # thread indefinitely.
+    from b6charger.httpd import REQUEST_TIMEOUT_S, make_handler
+
+    device = Device(FakeChargerTransport())
+    cache = MetricsCache(lambda: render_metrics(device), cache_s=0.0)
+    handler_cls = make_handler(device, cache, enable_writes=False)
+    assert handler_cls.timeout == REQUEST_TIMEOUT_S
+    assert handler_cls.timeout is not None
+
+
 def test_write_endpoints_check_enable_writes_before_token(running_server):
     # The --enable-writes gate is primary - checked before the token,
     # so a disabled daemon still 403s regardless of any token supplied.
