@@ -431,3 +431,71 @@ def test_start_dry_run_does_not_record_last_start(tmp_path, monkeypatch, capsys)
     args.func(args)
 
     assert last_start.read() is None
+
+
+# --- main(): translates exceptions into a friendly message, not a -------
+# --- raw traceback - previously untested, since every other test here --
+# --- calls args.func(args) directly rather than going through main() ----
+
+
+def test_main_reports_oserror_as_friendly_message_not_traceback(monkeypatch, capsys):
+    # HidRawTransport does raw os.open/os.write/os.read - a mid-command
+    # hardware failure (permission error, device unplugged) is a bare
+    # OSError, not a DeviceTimeout, and main() used to only catch the
+    # latter.
+    def raise_oserror(self, frame, n=64):
+        raise OSError("no such device")
+
+    monkeypatch.setattr("b6charger.transport.FakeChargerTransport.transact", raise_oserror)
+
+    try:
+        cli.main(["--fake", "status"])
+        raised = False
+    except SystemExit as e:
+        raised = True
+        assert e.code == 1
+    assert raised
+    err = capsys.readouterr().err
+    assert "error:" in err
+    assert "no such device" in err
+
+
+def test_main_reports_device_timeout_as_friendly_message(monkeypatch, capsys):
+    from b6charger.transport import DeviceTimeout
+
+    def raise_timeout(self, frame, n=64):
+        raise DeviceTimeout("no response within 3.0s")
+
+    monkeypatch.setattr("b6charger.transport.FakeChargerTransport.transact", raise_timeout)
+
+    try:
+        cli.main(["--fake", "status"])
+        raised = False
+    except SystemExit as e:
+        raised = True
+        assert e.code == 1
+    assert raised
+    assert "no response within 3.0s" in capsys.readouterr().err
+
+
+def test_start_prompt_aborts_cleanly_on_eof(capsys, monkeypatch):
+    # Piped/non-interactive stdin (e.g. `b6ctl start ... < /dev/null`)
+    # makes input() raise EOFError rather than returning - must abort
+    # cleanly, not crash with a raw traceback.
+    def raise_eof(_prompt):
+        raise EOFError()
+
+    monkeypatch.setattr("builtins.input", raise_eof)
+
+    parser = cli.build_parser()
+    args = parser.parse_args(
+        ["--fake", "start", "--chemistry", "lipo", "--cells", "3", "--current-ma", "1500"]
+    )
+    try:
+        args.func(args)
+        raised = False
+    except SystemExit as e:
+        raised = True
+        assert e.code == 1
+    assert raised
+    assert "no input available" in capsys.readouterr().err

@@ -209,7 +209,15 @@ def _confirm_and_send_start(
         dev.start_charging_verified(profile)
         return
     if not args.yes:
-        reply = input("Send this to the charger? [y/N] ")
+        try:
+            reply = input("Send this to the charger? [y/N] ")
+        except EOFError:
+            print(
+                "\naborted: no input available to confirm - use --auto-approve/--yes "
+                "if running non-interactively",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         if reply.strip().lower() != "y":
             print("aborted")
             sys.exit(1)
@@ -523,8 +531,12 @@ def main(argv: list[str] | None = None) -> None:
 
     Parses args, configures logging, dispatches to the selected
     subcommand's handler, and turns any of this project's own
-    exceptions into a one-line stderr message instead of a raw
-    traceback.
+    exceptions - plus a bare OSError, the shape a mid-command hardware
+    failure actually takes (e.g. PermissionError on /dev/hidraw* with
+    no udev rule, or ENODEV/ENXIO from a device unplugged mid-command;
+    HidRawTransport does raw os.open/os.write/os.read, none of which
+    is a DeviceTimeout) - into a one-line stderr message instead of a
+    raw traceback.
     """
     args = build_parser().parse_args(argv)
     logging.basicConfig(
@@ -533,7 +545,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     try:
         args.func(args)
-    except (PackConfigError, protocol.ProtocolError, DeviceTimeout) as e:
+    except (PackConfigError, protocol.ProtocolError, DeviceTimeout, OSError) as e:
         print(f"error: {e}", file=sys.stderr)
         sys.exit(1)
 
