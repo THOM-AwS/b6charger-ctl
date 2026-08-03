@@ -479,6 +479,12 @@ def make_handler(
             ceiling - all as real HTTP error responses instead of exiting
             the process. Returns None (having already sent an error
             response) on any failure.
+
+            Reads GET_SYS_INFO for the cell count, not GET_CHARGE_INFO -
+            see cli.py's _check_pack_cell_count_matches_device for why
+            (GET_CHARGE_INFO's cells_mv is always empty while idle on
+            this hardware, which is exactly the state a pre-start check
+            always runs in).
             """
             try:
                 registry = packs.load_registry()
@@ -488,9 +494,9 @@ def make_handler(
                 return None
 
             try:
-                info = device.get_charge_info()
+                info = device.get_sys_info()
             except Exception as e:  # noqa: BLE001 - surface to caller, don't swallow
-                log.exception("get_charge_info failed during pack cell-count check")
+                log.exception("get_sys_info failed during pack cell-count check")
                 self._json(502, {"error": str(e)})
                 return None
 

@@ -163,6 +163,30 @@ def test_start_with_pack_using_default_current_succeeds(tmp_path, monkeypatch, c
     assert "charge_current   = 1100mA" in out  # the pack's default_current_ma
 
 
+def test_start_with_pack_succeeds_while_idle_using_sysinfo_cells(
+    tmp_path, monkeypatch, capsys
+):
+    # Confirmed 2026-08-02 against real hardware (see DRY_RUN.md):
+    # GET_CHARGE_INFO's cells_mv is always empty while the charger is
+    # IDLE - exactly the state it's always in right before a charge
+    # starts. The safety check must read GET_SYS_INFO instead, which
+    # stays live regardless of state. This simulates that split: state
+    # is IDLE (so charge_info's own cells would read empty) while the
+    # fake's cells_mv (which sys_info encodes unconditionally) is real.
+    from b6charger import protocol
+    from b6charger.transport import FakeChargerTransport
+
+    _write_test_registry(tmp_path, monkeypatch)
+    fake = FakeChargerTransport()
+    fake.state = protocol.State.IDLE
+    monkeypatch.setattr("b6charger.cli.FakeChargerTransport", lambda: fake)
+
+    parser = cli.build_parser()
+    args = parser.parse_args(["--fake", "start", "--pack", "matches_fake", "--yes"])
+    args.func(args)
+    assert "sent." in capsys.readouterr().out
+
+
 def test_start_with_pack_mismatched_cell_count_refuses(tmp_path, monkeypatch, capsys):
     _write_test_registry(tmp_path, monkeypatch)
     parser = cli.build_parser()

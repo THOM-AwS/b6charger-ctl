@@ -275,8 +275,15 @@ def _check_pack_cell_count_matches_device(dev: Device, pack: Pack) -> None:
     --dry-run should tell you truthfully whether the real send would
     have been blocked, not skip the check. Exits with a clear
     explanation on mismatch; does nothing (returns) if the counts agree.
+
+    Reads GET_SYS_INFO, not GET_CHARGE_INFO - confirmed 2026-08-02 (see
+    DRY_RUN.md) that GET_CHARGE_INFO's cells_mv is always empty while
+    the charger is IDLE on this hardware, which is exactly the state
+    it's always in the moment before a charge starts. Checking it here
+    would make this safety gate permanently unable to pass. GET_SYS_INFO
+    stays genuinely live while idle - verified against a real pack.
     """
-    info = dev.get_charge_info()
+    info = dev.get_sys_info()
     try:
         packs.check_cell_count(pack, len(info.cells_mv))
     except packs.PackCellMismatch as e:

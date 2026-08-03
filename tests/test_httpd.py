@@ -292,8 +292,8 @@ def running_server():
 
     servers = []
 
-    def start(enable_writes: bool):
-        device = Device(FakeChargerTransport())
+    def start(enable_writes: bool, device: Device | None = None):
+        device = device or Device(FakeChargerTransport())
         cache = MetricsCache(lambda: render_metrics(device), cache_s=0.0)
         server = ThreadingHTTPServer(
             ("127.0.0.1", 0), make_handler(device, cache, enable_writes)
@@ -380,6 +380,26 @@ def _write_test_registry(tmp_path, monkeypatch) -> None:
 def test_post_start_with_matching_pack_succeeds(running_server, tmp_path, monkeypatch):
     _write_test_registry(tmp_path, monkeypatch)
     base_url = running_server(enable_writes=True)
+
+    body = json.dumps({"pack": "matches_fake"}).encode()
+    req = urllib.request.Request(f"{base_url}/start", data=body, method="POST")
+    with urllib.request.urlopen(req) as resp:
+        assert resp.status == 200
+        assert json.loads(resp.read())["ok"] is True
+
+
+def test_post_start_with_pack_succeeds_while_idle_using_sysinfo_cells(
+    running_server, tmp_path, monkeypatch
+):
+    # Same fix as cli.py's equivalent test: GET_CHARGE_INFO's cells_mv
+    # is always empty while IDLE on real hardware (see DRY_RUN.md), so
+    # this must pass using GET_SYS_INFO's cells, not GET_CHARGE_INFO's.
+    from b6charger import protocol
+
+    _write_test_registry(tmp_path, monkeypatch)
+    fake = FakeChargerTransport()
+    fake.state = protocol.State.IDLE
+    base_url = running_server(enable_writes=True, device=Device(fake))
 
     body = json.dumps({"pack": "matches_fake"}).encode()
     req = urllib.request.Request(f"{base_url}/start", data=body, method="POST")

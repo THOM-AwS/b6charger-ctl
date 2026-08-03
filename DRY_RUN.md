@@ -459,3 +459,37 @@ updated to expose these as `charger_sysinfo_pack_millivolts`/
 `charger_sysinfo_cell_millivolts`, separately from the
 `GET_CHARGE_INFO`-derived metrics (which stay zero until a charge
 actually starts) - see `httpd.py`'s `render_metrics()`.
+
+## Fix: the pack-registry safety check was reading the wrong command (2026-08-03)
+
+Direct consequence of the finding above, caught trying to actually use
+`start --pack` against the real hardware: `_check_pack_cell_count_matches_device`
+(cli.py) and `_build_profile_from_pack` (httpd.py) both read
+`GET_CHARGE_INFO`'s `cells_mv` for the live cell-count cross-check.
+Since that field is confirmed always empty while `IDLE` on this
+hardware - and the check only ever runs *before* a charge starts,
+i.e. always while `IDLE` - the check could never pass. `start --pack`
+was structurally unusable on this specific charger, not just
+overcautious: it would refuse every single time, regardless of what
+was actually connected.
+
+**Fix**: both call sites now read `GET_SYS_INFO` instead, which stays
+live while idle (see above). Verified with a real pack (`youme5200`,
+3S LiPo) connected and idle: the check now correctly detects 3 real
+cells and lets `start --pack` proceed, where it previously refused
+with "detects 0 real cell(s) connected" every time. Covered by
+`test_start_with_pack_succeeds_while_idle_using_sysinfo_cells` (both
+`test_cli.py` and `test_httpd.py`), which simulate the exact split:
+`state=IDLE` (so `GET_CHARGE_INFO`'s own cells would be empty) while
+`GET_SYS_INFO`'s cells are real.
+
+**Not yet independently verified**: that `GET_SYS_INFO`'s `cells_mv`
+correctly reads empty/filtered when NO battery is connected at all
+(only the positive case - real battery connected - has been directly
+tested). Structurally this should behave the same as `GET_CHARGE_INFO`'s
+cell array (same ADC-based balance-tap read, same `CELL_MIN_MV`/
+`CELL_MAX_MV` filter applied), so the floating-pin-noise and
+no-battery-near-zero behaviour already proven for `GET_CHARGE_INFO`
+should carry over - but this is inference from a shared code path, not
+a separate confirmed test. Worth doing if a genuinely no-battery
+moment is convenient to check.
