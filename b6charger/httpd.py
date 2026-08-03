@@ -211,6 +211,12 @@ def _sysinfo_lines(device: Device) -> list[str]:
         lines.append("# HELP charger_sysinfo_cell_count Number of real cells detected.")
         lines.append("# TYPE charger_sysinfo_cell_count gauge")
         lines.append(f"charger_sysinfo_cell_count {len(info.cells_mv)}")
+        lines.append(
+            "# HELP charger_sysinfo_cell_spread_millivolts Max-min cell voltage spread."
+        )
+        lines.append("# TYPE charger_sysinfo_cell_spread_millivolts gauge")
+        spread = max(info.cells_mv) - min(info.cells_mv)
+        lines.append(f"charger_sysinfo_cell_spread_millivolts {spread}")
     return lines
 
 

@@ -175,6 +175,7 @@ def test_render_metrics_includes_sysinfo_pack_voltage_and_cells(tmp_path, monkey
     assert "charger_sysinfo_pack_millivolts 11403" in body  # 3800+3805+3798
     assert 'charger_sysinfo_cell_millivolts{cell="1"} 3800' in body
     assert "charger_sysinfo_cell_count 3" in body
+    assert "charger_sysinfo_cell_spread_millivolts 7" in body  # 3805-3798
 
 
 def test_render_metrics_includes_sysinfo_even_when_charger_up_0(tmp_path, monkeypatch):
