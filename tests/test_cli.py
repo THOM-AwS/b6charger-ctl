@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 from b6charger import cli
+from b6charger.transport import FakeChargerTransport
 
 
 def test_status_json_against_fake(capsys):
@@ -523,3 +524,53 @@ def test_start_prompt_aborts_cleanly_on_eof(capsys, monkeypatch):
         assert e.code == 1
     assert raised
     assert "no input available" in capsys.readouterr().err
+
+
+# --- set-limits --key-buzzer/--system-buzzer: previously implemented ---
+# --- end-to-end (device.py/protocol.py) but unreachable from the CLI ----
+
+
+def _fake_dev_for(monkeypatch):
+    """Patch cli._make_transport to hand back one fixed FakeChargerTransport.
+
+    _cmd_set_limits (like every subcommand) builds its own transport via
+    _make_transport(args), which normally constructs a fresh
+    FakeChargerTransport per call under --fake - this intercepts that so
+    the test can inspect the fake's state afterwards.
+    """
+    fake = FakeChargerTransport()
+    monkeypatch.setattr(cli, "_make_transport", lambda args: fake)
+    return fake
+
+
+def test_set_limits_sets_both_buzzers_explicitly(monkeypatch, capsys):
+    fake = _fake_dev_for(monkeypatch)
+    parser = cli.build_parser()
+    args = parser.parse_args(["--fake", "set-limits", "--key-buzzer", "--no-system-buzzer"])
+    args.func(args)
+    assert "sent" in capsys.readouterr().out
+    assert fake.key_buzzer is True
+    assert fake.system_buzzer is False
+
+
+def test_set_limits_only_key_buzzer_preserves_current_system_buzzer(monkeypatch, capsys):
+    fake = _fake_dev_for(monkeypatch)
+    assert fake.system_buzzer is True  # FakeChargerTransport's own default
+    parser = cli.build_parser()
+    args = parser.parse_args(["--fake", "set-limits", "--no-key-buzzer"])
+    args.func(args)
+    capsys.readouterr()
+    assert fake.key_buzzer is False
+    assert fake.system_buzzer is True  # untouched - not silently flipped
+
+
+def test_set_limits_with_neither_buzzer_flag_does_not_touch_buzzers(monkeypatch, capsys):
+    fake = _fake_dev_for(monkeypatch)
+    parser = cli.build_parser()
+    args = parser.parse_args(["--fake", "set-limits", "--cycle-time", "5"])
+    assert args.key_buzzer is None
+    assert args.system_buzzer is None
+    args.func(args)
+    capsys.readouterr()
+    assert fake.key_buzzer is True  # FakeChargerTransport's own default, untouched
+    assert fake.system_buzzer is True

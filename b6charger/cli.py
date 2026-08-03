@@ -338,10 +338,16 @@ def _cmd_stop(args: argparse.Namespace) -> None:
 def _cmd_set_limits(args: argparse.Namespace) -> None:
     """Handle `b6ctl set-limits`.
 
-    Sends whichever of cycle-time/time-limit/capacity-limit/temp-limit
-    were given as flags. Verify with `b6ctl sysinfo` afterwards - a
-    successful send doesn't by itself prove the value was accepted,
+    Sends whichever of cycle-time/time-limit/capacity-limit/temp-limit/
+    buzzers were given as flags. Verify with `b6ctl sysinfo` afterwards -
+    a successful send doesn't by itself prove the value was accepted,
     only that the write didn't error.
+
+    The buzzer command sets both key and system buzzers in one frame -
+    there's no way to write just one. If only one of --key-buzzer/
+    --system-buzzer is given, the other's CURRENT value is read via
+    get_sys_info() and resent unchanged, so setting one never silently
+    flips the other.
     """
     dev = Device(_make_transport(args), dry_run=args.dry_run)
     if args.cycle_time is not None:
@@ -352,6 +358,13 @@ def _cmd_set_limits(args: argparse.Namespace) -> None:
         dev.set_capacity_limit(True, args.capacity_limit)
     if args.temp_limit is not None:
         dev.set_temp_limit(args.temp_limit)
+    if args.key_buzzer is not None or args.system_buzzer is not None:
+        current = dev.get_sys_info()
+        key = args.key_buzzer if args.key_buzzer is not None else current.key_buzzer
+        system = (
+            args.system_buzzer if args.system_buzzer is not None else current.system_buzzer
+        )
+        dev.set_buzzers(key, system)
     print("dry-run: would send SET commands above" if args.dry_run else "sent")
 
 
@@ -495,6 +508,18 @@ def build_parser() -> argparse.ArgumentParser:
     limits.add_argument("--time-limit", type=int, help="1-720 minutes")
     limits.add_argument("--capacity-limit", type=int, help="100-50000 mAh")
     limits.add_argument("--temp-limit", type=int, help="20-80 C")
+    limits.add_argument(
+        "--key-buzzer",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="enable/disable the key-press buzzer (--key-buzzer / --no-key-buzzer)",
+    )
+    limits.add_argument(
+        "--system-buzzer",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="enable/disable the system buzzer (--system-buzzer / --no-system-buzzer)",
+    )
     limits.add_argument("--dry-run", action="store_true")
     limits.set_defaults(func=_cmd_set_limits)
 

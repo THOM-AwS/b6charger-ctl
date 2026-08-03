@@ -204,7 +204,11 @@ def _simple_frame(cmd: int) -> bytes:
 
 
 def build_get_dev_info() -> bytes:
-    """Build a GET_DEV_INFO request frame."""
+    """Build a GET_DEV_INFO request frame.
+
+    Exposed for completeness (same as build_unk1 below) - not currently
+    called by device.py, so there's no `b6ctl` command that reaches it.
+    """
     return _simple_frame(Cmd.GET_DEV_INFO)
 
 
@@ -349,19 +353,31 @@ class ChargeProfile:
 
 # Defaults per libb6's Device::getDefaultChargeProfile - useful starting
 # points, not a substitute for setting current/capacity for YOUR pack.
+#
+# No NIMH/NICD/PB entries here on purpose: this project only ships a
+# lithium profile builder (lipo_profile, below), so those chemistries'
+# defaults would be dead code - worse, actively wrong dead code. An
+# earlier version of this table DID carry a NIMH end-voltage entry of
+# "4" (millivolts), which is libb6's peak-detect delta in a different
+# unit entirely, not a real per-cell end voltage (real NiMH end voltage
+# is roughly 1.5-1.8V/cell) - exactly the kind of landmine an unused-
+# but-present entry sets for whoever adds a nimh_profile() next and
+# reasonably assumes this table is trustworthy the way lipo_profile
+# does. If NiMH/NiCd/Pb support is ever added, populate real,
+# hardware-verified defaults for it then - see this project's own
+# verification discipline everywhere else in this file for why that
+# matters here specifically.
 DEFAULT_DISCHARGE_VOLTAGE_MV: dict[BatteryType, int] = {
     BatteryType.LIPO: 3200,
     BatteryType.LIION: 3100,
     BatteryType.LIFE: 2900,
     BatteryType.LIHV: 3200,
-    BatteryType.NIMH: 1100,
 }
 DEFAULT_END_VOLTAGE_MV: dict[BatteryType, int] = {
     BatteryType.LIPO: 4200,
     BatteryType.LIION: 4200,
     BatteryType.LIFE: 3700,
     BatteryType.LIHV: 4350,
-    BatteryType.NIMH: 4,
 }
 
 

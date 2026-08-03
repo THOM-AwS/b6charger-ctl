@@ -312,11 +312,18 @@ b6ctl set-limits --temp-limit 50 --time-limit 200 --capacity-limit 6000
 | `--time-limit` | integer, 1-720 (minutes) | not sent unless given | Charge time-limit safety cutoff (enabled when set) |
 | `--capacity-limit` | integer, 100-50000 (mAh) | not sent unless given | Charge capacity-limit safety cutoff (enabled when set) |
 | `--temp-limit` | integer, 20-80 (°C) | not sent unless given | Internal temperature cutoff |
+| `--key-buzzer` / `--no-key-buzzer` | (boolean) | not sent unless given | Key-press buzzer |
+| `--system-buzzer` / `--no-system-buzzer` | (boolean) | not sent unless given | System buzzer |
 | `--dry-run` | (boolean) | off | Log the SET frame(s) but send nothing |
 
 Only the limits you actually pass are sent - this command doesn't
 touch settings you didn't mention. Verify any change with
 `b6ctl sysinfo` afterwards.
+
+The buzzer command sets both key and system buzzers in one frame - there's
+no way to write just one. If you only pass one of `--key-buzzer`/
+`--system-buzzer`, `b6ctl` reads the other's current value first and resends
+it unchanged, so setting one never silently flips the other.
 
 ## HTTP API
 
