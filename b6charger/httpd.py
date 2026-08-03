@@ -615,6 +615,10 @@ def make_handler(
                 self._json(400, {"error": str(e)})
                 return None
 
+            warning = packs.example_registry_warning(registry)
+            if warning is not None:
+                log.warning("POST /start from %s: %s", self.client_address[0], warning)
+
             try:
                 return charge_request.build_pack_profile(
                     device,

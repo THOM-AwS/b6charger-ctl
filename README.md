@@ -97,6 +97,19 @@ machine, it's never committed, and it's never included in this
 repository (the shipped [`packs.example.toml`](packs.example.toml) is
 a harmless one-entry placeholder, not real battery data).
 
+`b6ctl` looks for it in this order: the `B6CTL_PACKS` environment
+variable (an explicit path override - set this for `b6ctl serve`
+specifically if it runs under systemd or similar, where
+`WorkingDirectory` might not be wherever `packs.toml` actually lives),
+then `packs.toml` in the current directory (the default for running
+`b6ctl` interactively from wherever you keep it), then
+`~/.config/b6charger-ctl/packs.toml`, then finally
+`packs.example.toml`. If it ever falls back to the example file, every
+command that would start a real charge from `--pack` prints/logs a
+warning saying so - starting a real charge against the placeholder
+roster instead of your own is exactly the kind of mistake this file
+exists to prevent.
+
 **2. Edit `packs.toml`** - one `[[pack]]` block per battery. Every
 value comes straight off the label printed on the pack itself; you're
 not guessing or measuring anything:

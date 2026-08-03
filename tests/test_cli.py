@@ -168,6 +168,30 @@ def test_start_with_pack_using_default_current_succeeds(tmp_path, monkeypatch, c
     assert "charge_current   = 1100mA" in out  # the pack's default_current_ma
 
 
+def test_start_with_pack_warns_when_using_example_registry(tmp_path, monkeypatch, capsys):
+    # Previously only `packs list` surfaced this - the path where it
+    # matters most (about to actually command a charge) said nothing.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "packs.example.toml").write_text("""
+        [[pack]]
+        name = "example_pack"
+        description = "placeholder"
+        chemistry = "lipo"
+        cells = 1
+        capacity_mah = 1000
+        default_current_ma = 500
+        """)
+    parser = cli.build_parser()
+    args = parser.parse_args(["--fake", "start", "--pack", "example_pack", "--yes"])
+    try:
+        args.func(args)
+    except SystemExit:
+        pass  # the 1S/3S cell-count mismatch is expected and irrelevant here
+    err = capsys.readouterr().err
+    assert "warning:" in err
+    assert "example/placeholder" in err
+
+
 def test_start_with_pack_succeeds_while_idle_using_sysinfo_cells(
     tmp_path, monkeypatch, capsys
 ):

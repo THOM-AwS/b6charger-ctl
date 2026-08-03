@@ -20,14 +20,43 @@ harmless `packs.example.toml` template if it doesn't exist yet.
 
 from __future__ import annotations
 
+import os
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
 from b6charger.protocol import MAX_DEVICE_CURRENT_MA
 
+#: Explicit override for where packs.toml lives, checked before any
+#: implicit location. Exists because CWD-relative lookup (the next
+#: candidate below) is unreliable for `serve` specifically: a systemd
+#: unit's WorkingDirectory can be set to anything, and doesn't have to
+#: match wherever packs.toml actually is - confirmed a real problem in
+#: this project's own deployment (WorkingDirectory one level below
+#: where packs.toml lives, see DRY_RUN.md). Set this instead of relying
+#: on CWD when running as a daemon.
+PACKS_PATH_ENV_VAR = "B6CTL_PACKS"
+
 DEFAULT_CONFIG_PATH = Path("packs.toml")
 EXAMPLE_CONFIG_PATH = Path("packs.example.toml")
+
+
+def _user_config_path() -> Path | None:
+    """Return the stable, CWD-independent fallback location for packs.toml, if resolvable.
+
+    Checked AFTER the CWD-relative path, not before, to keep today's
+    "cd somewhere, drop a packs.toml there" workflow taking priority,
+    matching how this tool has always been used interactively. A
+    function rather than a module-level constant so a HOME-less
+    environment (e.g. a minimal container) can't fail this module's
+    import - it just means this fallback resolves to None and is
+    skipped, same as if the file simply didn't exist there.
+    """
+    try:
+        return Path.home() / ".config" / "b6charger-ctl" / "packs.toml"
+    except RuntimeError:
+        return None
+
 
 VALID_CHEMISTRIES = {"lipo", "lihv"}
 
@@ -186,10 +215,15 @@ def _validate_pack(name: str, raw: dict) -> Pack:
 def load_registry(path: Path | None = None) -> PackRegistry:
     """Load the pack registry.
 
-    With no `path`, prefers `packs.toml` (your real, local, gitignored
-    config) and falls back to `packs.example.toml` (the safe placeholder
-    shipped in the repo) if it doesn't exist yet. Pass `path` explicitly
-    to load a specific file instead (mainly for tests).
+    With no `path`, resolves in order: $B6CTL_PACKS (an explicit
+    override - see PACKS_PATH_ENV_VAR), `packs.toml` relative to the
+    current directory (your real, local, gitignored config - today's
+    default workflow, still checked first among the implicit options),
+    then a stable per-user location outside the CWD (see
+    _user_config_path) for when neither of those apply. Falls back to
+    `packs.example.toml` (the safe placeholder shipped in the repo)
+    only if none of those exist. Pass `path` explicitly to load a
+    specific file instead (mainly for tests).
 
     Raises PackConfigError with a specific, actionable message if the
     file is missing, malformed, or configures something unsafe - never
@@ -198,15 +232,24 @@ def load_registry(path: Path | None = None) -> PackRegistry:
     if path is not None:
         candidates = [(path, path == EXAMPLE_CONFIG_PATH)]
     else:
-        candidates = [(DEFAULT_CONFIG_PATH, False), (EXAMPLE_CONFIG_PATH, True)]
+        candidates = []
+        env_path = os.environ.get(PACKS_PATH_ENV_VAR)
+        if env_path:
+            candidates.append((Path(env_path), False))
+        candidates.append((DEFAULT_CONFIG_PATH, False))
+        user_path = _user_config_path()
+        if user_path is not None:
+            candidates.append((user_path, False))
+        candidates.append((EXAMPLE_CONFIG_PATH, True))
 
     for candidate_path, is_example in candidates:
         if candidate_path.exists():
             return _load_from_path(candidate_path, is_example)
 
+    tried = ", ".join(str(c) for c, _ in candidates)
     raise PackConfigError(
-        f"no pack registry found ({DEFAULT_CONFIG_PATH} or {EXAMPLE_CONFIG_PATH}) "
-        "- see README.md's 'Configure your batteries' section"
+        f"no pack registry found (tried: {tried}) - see README.md's "
+        "'Configure your batteries' section, or set $B6CTL_PACKS"
     )
 
 
@@ -232,6 +275,23 @@ def _load_from_path(path: Path, is_example: bool) -> PackRegistry:
         packs[name] = _validate_pack(name, raw)
 
     return PackRegistry(packs=packs, source_path=path, is_example=is_example)
+
+
+def example_registry_warning(registry: PackRegistry) -> str | None:
+    """Return a warning message if `registry` is the placeholder example file, else None.
+
+    Every caller that builds a real ChargeProfile from a pack (`b6ctl
+    start --pack`, `POST /start` with a pack) should surface this, not
+    just `packs list` (the only place it was previously shown) -
+    starting a real charge against the single-entry placeholder roster
+    instead of your own packs.toml is a genuine, silent-otherwise risk.
+    """
+    if not registry.is_example:
+        return None
+    return (
+        f"using the example/placeholder registry at {registry.source_path} - "
+        "see README.md 'Configure your batteries' to set up your own packs.toml"
+    )
 
 
 def check_cell_count(pack: Pack, detected_cells: int) -> None:

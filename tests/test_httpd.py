@@ -597,6 +597,33 @@ def test_post_start_returns_502_when_start_charging_verified_fails(running_serve
     assert exc_info.value.code == 502
 
 
+def test_post_start_with_pack_warns_when_using_example_registry(
+    running_server, tmp_path, monkeypatch, caplog
+):
+    # Previously only `b6ctl packs list` surfaced this - the HTTP write
+    # path said nothing about running off placeholder data either.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "packs.example.toml").write_text("""
+        [[pack]]
+        name = "example_pack"
+        description = "placeholder"
+        chemistry = "lipo"
+        cells = 3
+        capacity_mah = 2200
+        default_current_ma = 1100
+        """)
+    monkeypatch.setattr("b6charger.device.time.sleep", lambda _s: None)
+    base_url = running_server(enable_writes=True)
+
+    with caplog.at_level("WARNING"):
+        body = json.dumps({"pack": "example_pack"}).encode()
+        req = urllib.request.Request(f"{base_url}/start", data=body, method="POST")
+        with urllib.request.urlopen(req) as resp:
+            assert resp.status == 200
+
+    assert any("example/placeholder" in rec.message for rec in caplog.records)
+
+
 def test_post_start_with_pack_returns_502_when_get_sys_info_fails(
     running_server, tmp_path, monkeypatch
 ):

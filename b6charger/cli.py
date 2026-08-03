@@ -154,11 +154,9 @@ def _cmd_sysinfo(args: argparse.Namespace) -> None:
 def _cmd_packs_list(args: argparse.Namespace) -> None:
     """Handle `b6ctl packs list`: print every pack in the registry."""
     registry = packs.load_registry()
-    if registry.is_example:
-        print(
-            f"(using the example/placeholder registry at {registry.source_path} - "
-            "see README.md 'Configure your batteries' to set up your own packs.toml)\n"
-        )
+    warning = packs.example_registry_warning(registry)
+    if warning is not None:
+        print(f"({warning})\n")
     for pack in registry:
         hv = " (HV)" if pack.is_hv else ""
         print(
@@ -287,6 +285,9 @@ def _cmd_start(args: argparse.Namespace) -> None:
     if args.pack:
         try:
             registry = packs.load_registry()
+            warning = packs.example_registry_warning(registry)
+            if warning is not None:
+                print(f"warning: {warning}", file=sys.stderr)
             profile = charge_request.build_pack_profile(
                 dev,
                 registry,
