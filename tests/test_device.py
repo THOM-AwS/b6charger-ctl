@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from b6charger import protocol
 from b6charger.device import Device
-from b6charger.transport import FakeChargerTransport
+from b6charger.transport import DeviceTimeout, FakeChargerTransport
 
 
 def test_start_stop_round_trip():
@@ -155,3 +155,80 @@ def test_start_charging_verified_stops_on_cell_count_mismatch_even_if_charging()
     assert result.confirmed is False
     assert result.stopped is True
     assert fake._last_write == protocol.build_stop_charging()
+
+
+def test_start_charging_verified_stops_safely_if_confirmation_read_raises():
+    # A real transport failure (DeviceTimeout, a disconnected device)
+    # during the post-start confirmation read must not propagate out of
+    # start_charging_verified - START_CHARGING has already been sent for
+    # real by this point, so an unhandled exception here would leave
+    # that command's outcome completely unaddressed. Must fail safe:
+    # STOP_CHARGING sent as a precaution, confirmed=False returned.
+    fake = FakeChargerTransport()
+    real_transact = FakeChargerTransport.transact
+
+    def transact(self, frame, n=64):
+        if frame[2] == protocol.Cmd.GET_CHARGE_INFO:
+            raise DeviceTimeout("no response")
+        return real_transact(self, frame, n)
+
+    fake.transact = transact.__get__(fake)
+    dev = Device(fake)
+    profile = protocol.lipo_profile(cell_count=3, charge_current_ma=1500)
+    result = dev.start_charging_verified(profile, confirm_delay_s=0, retry_delay_s=0)
+
+    assert result.confirmed is False
+    assert result.stopped is True
+    assert result.info is None
+    assert "could not read back charger state" in result.reason
+    assert fake._last_write == protocol.build_stop_charging()
+
+
+def test_start_charging_verified_reports_when_precautionary_stop_also_fails():
+    # If the confirmation read AND the resulting precautionary stop both
+    # fail, the caller must still get a clean StartVerification (not a
+    # raised exception) - with the second failure folded into `reason`
+    # so it's clear the charger might still be running.
+    fake = FakeChargerTransport()
+    real_transact = FakeChargerTransport.transact
+
+    def transact(self, frame, n=64):
+        if frame[2] in (protocol.Cmd.GET_CHARGE_INFO, protocol.Cmd.STOP_CHARGING):
+            raise DeviceTimeout("no response")
+        return real_transact(self, frame, n)
+
+    fake.transact = transact.__get__(fake)
+    dev = Device(fake)
+    profile = protocol.lipo_profile(cell_count=3, charge_current_ma=1500)
+    result = dev.start_charging_verified(profile, confirm_delay_s=0, retry_delay_s=0)
+
+    assert result.confirmed is False
+    assert result.stopped is False
+    assert "STOP_CHARGING ALSO FAILED" in result.reason
+
+
+def test_start_charging_verified_stops_safely_if_error_state_stop_raises():
+    # An explicit ERROR read succeeds (so we know the charger's state),
+    # but the resulting precautionary STOP_CHARGING itself fails - must
+    # still return cleanly, with info from the successful read retained.
+    fake = FakeChargerTransport()
+    real_transact = FakeChargerTransport.transact
+
+    def transact(self, frame, n=64):
+        if frame[2] == protocol.Cmd.GET_CHARGE_INFO:
+            self.state = protocol.State.ERROR
+            self.error_code = protocol.Error.CELL_NUMBER_INCORRECT
+        elif frame[2] == protocol.Cmd.STOP_CHARGING:
+            raise DeviceTimeout("no response")
+        return real_transact(self, frame, n)
+
+    fake.transact = transact.__get__(fake)
+    dev = Device(fake)
+    profile = protocol.lipo_profile(cell_count=4, charge_current_ma=1000, hv=True)
+    result = dev.start_charging_verified(profile, confirm_delay_s=0, retry_delay_s=0)
+
+    assert result.confirmed is False
+    assert result.stopped is False
+    assert result.info is not None
+    assert "CELL_NUMBER_INCORRECT" in result.reason
+    assert "STOP_CHARGING ALSO FAILED" in result.reason

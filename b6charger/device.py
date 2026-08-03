@@ -28,10 +28,18 @@ DEFAULT_RETRY_DELAY_S = 2.0
 
 @dataclass(frozen=True)
 class StartVerification:
-    """Result of start_charging_verified(): did the charger actually confirm it started."""
+    """Result of start_charging_verified(): did the charger actually confirm it started.
+
+    `info` is the most recent successful GET_CHARGE_INFO read - always
+    present when `confirmed` is True, and also present on most failure
+    paths (a mismatched state/cell-count, or an explicit ERROR). It's
+    only None when even reading back the charger's state failed (a
+    transport-level failure, not a protocol-level one) - there's
+    nothing to report in that case beyond `reason`.
+    """
 
     confirmed: bool
-    info: protocol.ChargeInfo
+    info: protocol.ChargeInfo | None
     stopped: bool
     reason: str | None
 
@@ -124,34 +132,89 @@ class Device:
         stopping - this guards specifically against a single transient
         bad read causing an unnecessary abort of an otherwise-fine
         charge, not against a real fault the charger itself reports.
+
+        A transport failure (DeviceTimeout, or any other exception)
+        during either confirmation read is treated the same as an
+        explicit ERROR - immediately terminal, no retry, STOP_CHARGING
+        sent as a precaution - rather than propagating out of this
+        function. START_CHARGING has already gone out on the wire by
+        this point; letting a read failure escape unhandled would
+        leave that command's outcome completely unaddressed, which is
+        exactly what this function exists to prevent (see above). If
+        the precautionary STOP_CHARGING itself also fails, that's
+        folded into the returned `reason` rather than raised - see
+        `_stop_with_reason`.
         """
         self.start_charging(profile)
         if self.dry_run:
             return None
 
         time.sleep(confirm_delay_s)
-        info = self.get_charge_info()
+        info = self._read_after_start()
+        if isinstance(info, StartVerification):
+            return info
         result = self._evaluate_start(info, profile)
         if result is not None:
             return result
 
         time.sleep(retry_delay_s)
-        info = self.get_charge_info()
+        info = self._read_after_start()
+        if isinstance(info, StartVerification):
+            return info
         result = self._evaluate_start(info, profile)
         if result is not None:
             return result
 
-        self.stop_charging()
-        return StartVerification(
-            confirmed=False,
+        return self._stop_with_reason(
+            f"charger did not confirm charging after "
+            f"{confirm_delay_s + retry_delay_s:.0f}s (state={info.state_name}, "
+            f"cells detected={len(info.cells_mv)}, expected={profile.cell_count})",
             info=info,
-            stopped=True,
-            reason=(
-                f"charger did not confirm charging after "
-                f"{confirm_delay_s + retry_delay_s:.0f}s (state={info.state_name}, "
-                f"cells detected={len(info.cells_mv)}, expected={profile.cell_count})"
-            ),
         )
+
+    def _read_after_start(self) -> protocol.ChargeInfo | StartVerification:
+        """Read GET_CHARGE_INFO for start-verification, or fail safe if the read itself fails.
+
+        Returns the ChargeInfo on success. On any transport failure,
+        returns an already-final, failed StartVerification (via
+        `_stop_with_reason`) instead of letting the exception escape -
+        see start_charging_verified's docstring for why.
+        """
+        try:
+            return self.get_charge_info()
+        except (
+            Exception
+        ) as e:  # noqa: BLE001 - any transport failure fails safe here, not just DeviceTimeout
+            log.exception("read failed during start verification")
+            return self._stop_with_reason(
+                f"could not read back charger state after START_CHARGING ({e})"
+            )
+
+    def _stop_with_reason(
+        self, reason: str, info: protocol.ChargeInfo | None = None
+    ) -> StartVerification:
+        """Send STOP_CHARGING as a precaution and return a failed, final StartVerification.
+
+        `info` is the most recent successful GET_CHARGE_INFO read, if
+        any - omitted when even the read itself failed. If
+        STOP_CHARGING itself also fails, that failure is folded into
+        `reason` rather than raised: the caller already knows
+        `confirmed` is False, and needs to know the charger might
+        still be running, which raising here would obscure rather
+        than surface.
+        """
+        try:
+            self.stop_charging()
+            stopped = True
+        except (
+            Exception
+        ) as e:  # noqa: BLE001 - report, don't compound one failure with a crash
+            log.exception("STOP_CHARGING itself failed after a failed start verification")
+            stopped = False
+            reason = (
+                f"{reason} - STOP_CHARGING ALSO FAILED ({e}), charger may still be charging"
+            )
+        return StartVerification(confirmed=False, info=info, stopped=stopped, reason=reason)
 
     def _evaluate_start(
         self, info: protocol.ChargeInfo, profile: protocol.ChargeProfile
@@ -169,12 +232,8 @@ class Device:
             return StartVerification(confirmed=True, info=info, stopped=False, reason=None)
 
         if info.state == protocol.State.ERROR:
-            self.stop_charging()
-            return StartVerification(
-                confirmed=False,
-                info=info,
-                stopped=True,
-                reason=f"charger reported an error: {info.error_name} ({info.error_code})",
+            return self._stop_with_reason(
+                f"charger reported an error: {info.error_name} ({info.error_code})", info=info
             )
 
         return None
