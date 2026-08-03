@@ -329,3 +329,71 @@ def test_resolve_serve_host_port_with_listen_and_port_is_rejected(capsys):
         raised = True
     assert raised
     assert "cannot be combined" in capsys.readouterr().err
+
+
+# --- `start` records what it sent, for dashboards - see last_start.py --
+
+
+def test_start_yes_records_last_start(tmp_path, monkeypatch, capsys):
+    from b6charger import last_start
+
+    monkeypatch.setattr("b6charger.last_start.DEFAULT_PATH", str(tmp_path / "last_start.json"))
+    parser = cli.build_parser()
+    args = parser.parse_args(
+        [
+            "--fake",
+            "start",
+            "--chemistry",
+            "lihv",
+            "--cells",
+            "4",
+            "--current-ma",
+            "1000",
+            "--yes",
+        ]
+    )
+    args.func(args)
+
+    entry = last_start.read()
+    assert entry is not None
+    assert entry.battery_type == "LIHV"
+    assert entry.cells == 4
+    assert entry.current_ma == 1000
+    assert entry.pack is None
+
+
+def test_start_pack_yes_records_the_pack_name(tmp_path, monkeypatch, capsys):
+    from b6charger import last_start
+
+    monkeypatch.setattr("b6charger.last_start.DEFAULT_PATH", str(tmp_path / "last_start.json"))
+    _write_test_registry(tmp_path, monkeypatch)
+    parser = cli.build_parser()
+    args = parser.parse_args(["--fake", "start", "--pack", "matches_fake", "--yes"])
+    args.func(args)
+
+    entry = last_start.read()
+    assert entry is not None
+    assert entry.pack == "matches_fake"
+
+
+def test_start_dry_run_does_not_record_last_start(tmp_path, monkeypatch, capsys):
+    from b6charger import last_start
+
+    monkeypatch.setattr("b6charger.last_start.DEFAULT_PATH", str(tmp_path / "last_start.json"))
+    parser = cli.build_parser()
+    args = parser.parse_args(
+        [
+            "--fake",
+            "start",
+            "--chemistry",
+            "lipo",
+            "--cells",
+            "3",
+            "--current-ma",
+            "1500",
+            "--dry-run",
+        ]
+    )
+    args.func(args)
+
+    assert last_start.read() is None

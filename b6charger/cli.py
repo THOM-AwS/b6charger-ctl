@@ -32,7 +32,7 @@ import logging
 import sys
 from http.server import ThreadingHTTPServer
 
-from b6charger import httpd, packs, protocol
+from b6charger import httpd, last_start, packs, protocol
 from b6charger.device import Device
 from b6charger.packs import Pack, PackConfigError
 from b6charger.transport import (
@@ -178,7 +178,9 @@ def _cmd_packs_show(args: argparse.Namespace) -> None:
     print(f"max_current_ma:     {pack.max_current_ma}")
 
 
-def _confirm_and_send_start(dev: Device, profile: protocol.ChargeProfile, args) -> None:
+def _confirm_and_send_start(
+    dev: Device, profile: protocol.ChargeProfile, args, pack_name: str | None = None
+) -> None:
     """Print the profile about to be sent, then send it or log it under --dry-run.
 
     Sends after an interactive confirmation (unless --auto-approve); in
@@ -186,6 +188,10 @@ def _confirm_and_send_start(dev: Device, profile: protocol.ChargeProfile, args) 
     at all. This is the single choke point every `start` path goes
     through (manual flags or --pack), so the confirmation behaviour
     can't accidentally diverge between them.
+
+    Records the profile via last_start.record() on a real send only -
+    not under --dry-run, since nothing was actually commanded then and
+    recording it would misrepresent what the charger was told to do.
     """
     print("About to send START with:")
     print(f"  battery_type = {profile.battery_type.name}")
@@ -203,6 +209,7 @@ def _confirm_and_send_start(dev: Device, profile: protocol.ChargeProfile, args) 
             print("aborted")
             sys.exit(1)
     dev.start_charging(profile)
+    last_start.record(profile, pack=pack_name)
     print("sent.")
 
 
@@ -310,7 +317,7 @@ def _cmd_start(args: argparse.Namespace) -> None:
         hv=hv,
         discharge_current_ma=args.discharge_current_ma,
     )
-    _confirm_and_send_start(dev, profile, args)
+    _confirm_and_send_start(dev, profile, args, pack_name=pack.name if pack else None)
 
 
 def _cmd_stop(args: argparse.Namespace) -> None:

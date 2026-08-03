@@ -122,21 +122,29 @@ class BatteryType(IntEnum):
 class State(IntEnum):
     """Charger state, as reported in GET_CHARGE_INFO's state byte.
 
-    Per libb6's Enum.hh - the only source read directly here, rather
-    than inferred from panel behaviour. Some other B6-family tooling in
-    the wild labels state 4 as "idle" rather than a second error state;
-    unverified which is correct on which firmware. See README.md's
-    "STATE 4 discrepancy".
+    libb6's Enum.hh names values 2 and 4 ERROR_1/ERROR_2 - this project
+    trusted that naming until 2026-08-02, when it turned out to be
+    wrong. Confirmed via an independent reverse-engineering project
+    (buxtronix/b6max, a separately-typed Go implementation) whose own
+    State enum names value 2 StateIdle and value 4 StateError - i.e.
+    there is only ONE real error state, not two. This matches
+    everything this project had already observed independently: the
+    charger's own panel showing nothing wrong while state read 2, an
+    error_code of 0 (not a valid code in Error below) decoded there,
+    and the charger booting directly into state 2 with no battery
+    connected - not something a device does if that state were a
+    genuine fault. IDLE=2 was previously ERROR_1; ERROR=4 was
+    previously ERROR_2. See DRY_RUN.md for the full finding.
     """
 
     CHARGING = 1
-    ERROR_1 = 2
+    IDLE = 2
     COMPLETE = 3
-    ERROR_2 = 4
+    ERROR = 4
 
 
 class Error(IntEnum):
-    """Error codes returned alongside an ERROR_1/ERROR_2 state, per Enum.hh."""
+    """Error codes returned alongside the ERROR state, per Enum.hh."""
 
     CONNECTION_BROKEN_1 = 0x000B
     CELL_VOLTAGE_INVALID = 0x000C
@@ -398,30 +406,40 @@ def build_start_charging(profile: ChargeProfile) -> bytes:
 class ChargeInfo:
     """Decoded GET_CHARGE_INFO response: live charge telemetry.
 
-    When `state` is ERROR_1/ERROR_2, only `state` and `error_code` are
-    reliably real - capacity/time/voltage/current/impedance/cells_mv
-    are all zeroed/empty rather than guessed at. libb6's own Device.cc
-    reads the error code and then STOPS - it never reads any further
-    fields during an error response, so there is no authoritative
-    layout to point at here.
+    When `state` is IDLE or ERROR, `capacity`/`time`/`voltage`/
+    `current`/`impedance`/`cells_mv` are all zeroed/empty rather than
+    guessed at. For ERROR this is because libb6's Device.cc reads the
+    error code and then STOPS - it never reads any further fields
+    during an error response, so there is no authoritative layout to
+    point at. For IDLE it's a separate, still-open caution: this
+    project's own hardware showed stale leftover data (a real-looking
+    but frozen voltage/current/cells from the prior charge) in this
+    exact state before a restart cleared it - so even though an
+    independent project (buxtronix/b6max) decodes IDLE with the full
+    normal layout, this codebase doesn't trust that yet without its
+    own live-battery-while-idle verification. `error_code` is ONLY set
+    for the real ERROR state - IDLE has no error, decoding u16(5) as
+    one there would be actively wrong now that the two are known
+    apart. See DRY_RUN.md for the full finding.
 
-    `temp_ext_c`/`temp_int_c` ARE decoded even in this state, at the
-    same offsets the normal-state parser uses, but the confidence level
-    here is lower than the module previously claimed: a first no-battery
-    capture (2026-08-02) decoded temp_int_c=24 (plausible) while
-    voltage/current/cells in that same read were confirmed-stale
-    leftovers from the prior charge - read at the time as evidence
-    temp was a live, pack-independent sensor. A physical power-cycle
-    the same day disproved that: post-restart, in the identical state,
-    temp_int_c read 0 - alongside every pack field ALSO freshly zeroed
-    instead of stale. That pattern is much more consistent with temp
-    being populated by firmware only during/after an active charge
-    session (frozen like the other fields, just cleared by the same
-    restart) than with it being an independently-live sensor. Decoded
-    anyway because, unlike voltage/current/cells, nothing in this
-    codebase treats temp as a safety input - a stale-or-zero reading
-    here is a monitoring-accuracy question, not a fire-risk one. See
-    DRY_RUN.md for the full timeline, including this correction.
+    `temp_ext_c`/`temp_int_c` ARE decoded in both IDLE and ERROR, at
+    the same offsets the normal-state parser uses, but the confidence
+    level here is lower than an earlier version of this module
+    claimed: a first no-battery capture (2026-08-02) decoded
+    temp_int_c=24 (plausible) while voltage/current/cells in that same
+    read were confirmed-stale leftovers from the prior charge - read
+    at the time as evidence temp was a live, pack-independent sensor.
+    A physical power-cycle the same day disproved that: post-restart,
+    in the identical state, temp_int_c read 0 - alongside every pack
+    field ALSO freshly zeroed instead of stale. That pattern is much
+    more consistent with temp being populated by firmware only
+    during/after an active charge session (frozen like the other
+    fields, just cleared by the same restart) than with it being an
+    independently-live sensor. Decoded anyway because, unlike
+    voltage/current/cells, nothing in this codebase treats temp as a
+    safety input - a stale-or-zero reading here is a
+    monitoring-accuracy question, not a fire-risk one. See DRY_RUN.md
+    for the full timeline, including this correction.
     """
 
     state: int
@@ -469,25 +487,31 @@ def _is_real_cell(mv: int) -> bool:
     return CELL_MIN_MV <= mv <= CELL_MAX_MV
 
 
-_ERROR_STATES = (State.ERROR_1, State.ERROR_2)
+#: States that get the conservative "short frame" decode - state/temp
+#: only, everything pack-derived zeroed/empty. Named for what they
+#: share (no trusted pack telemetry), not for what they mean - only
+#: ERROR is a genuine fault; IDLE just hasn't been verified safe to
+#: decode fully yet. See ChargeInfo's docstring.
+_SHORT_FRAME_STATES = (State.IDLE, State.ERROR)
 
 
 def parse_charge_info(resp: bytes) -> ChargeInfo:
     """Parse a GET_CHARGE_INFO response frame into a ChargeInfo.
 
-    When the state byte is ERROR_1/ERROR_2, `capacity`/`time`/
-    `voltage`/`current`/`impedance`/`cells_mv` are zeroed/empty rather
-    than decoded - libb6's Device.cc confirms the wire format inserts a
-    2-byte error code immediately after the state byte in that case,
-    but it never reads anything past that error code (it throws
-    immediately), so there is no verified layout for those
-    pack-derived fields during an error response, and reporting them
-    as zero/empty is honest about not knowing them (see DRY_RUN.md's
-    "stale voltage/current after disconnect" finding - guessing at a
-    shifted continuation of the normal layout would reintroduce
-    exactly that bug).
+    When the state byte is IDLE or ERROR, `capacity`/`time`/`voltage`/
+    `current`/`impedance`/`cells_mv` are zeroed/empty rather than
+    decoded - libb6's Device.cc confirms the wire format inserts a
+    2-byte error code immediately after the state byte during ERROR,
+    but it never reads anything past that (it throws immediately), so
+    there is no verified layout for those pack-derived fields there;
+    IDLE gets the same conservative treatment for a different reason
+    (see ChargeInfo's docstring) rather than guessing at a shifted
+    continuation of the normal layout, which is exactly what produced
+    a real stale-data bug in production before (see DRY_RUN.md).
+    `error_code` is only decoded for ERROR - IDLE isn't an error, so
+    u16(5) there isn't one either.
 
-    `temp_ext_c`/`temp_int_c` ARE decoded even in an error state, at
+    `temp_ext_c`/`temp_int_c` ARE decoded in both IDLE and ERROR, at
     the same offsets the normal-state path already trusts - but decode
     here does not mean "guaranteed live": a same-day physical restart
     test showed this field reads 0 right after power-on and only a
@@ -508,7 +532,7 @@ def parse_charge_info(resp: bytes) -> ChargeInfo:
 
     state = resp[4]
 
-    if state in (s.value for s in _ERROR_STATES):
+    if state in (s.value for s in _SHORT_FRAME_STATES):
         return ChargeInfo(
             state=state,
             capacity_mah=0,
@@ -519,7 +543,7 @@ def parse_charge_info(resp: bytes) -> ChargeInfo:
             temp_int_c=resp[14],
             impedance_mohm=0,
             cells_mv=(),
-            error_code=u16(5),
+            error_code=u16(5) if state == State.ERROR else None,
         )
 
     cells = tuple(u16(17 + 2 * i) for i in range(8) if _is_real_cell(u16(17 + 2 * i)))

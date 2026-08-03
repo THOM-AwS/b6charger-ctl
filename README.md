@@ -356,12 +356,28 @@ logged with the caller's address first.
 `GET_CHARGE_INFO`, it just wasn't decoded before. Point Prometheus (or
 `curl`) at `http://<host>:9111/metrics`.
 
+It also reports `charger_sysinfo_pack_millivolts`/
+`charger_sysinfo_cell_millivolts{cell="N"}`/`charger_sysinfo_cell_count`,
+sourced from `GET_SYS_INFO` rather than `GET_CHARGE_INFO` - these stay
+live while the charger is idle (confirmed 2026-08-02 with a real pack
+connected), unlike the `GET_CHARGE_INFO`-derived
+`charger_pack_millivolts`/`charger_cell_millivolts`, which read zero
+until a charge actually starts. Use the `sysinfo` metrics for "is a
+battery connected and what's its voltage right now"; use the plain
+ones for in-session charge telemetry once charging begins.
+
 `POST /start` with `{"pack": "name", ...}` is the HTTP equivalent of
 `b6ctl start --pack` - it runs the exact same live cell-count
 cross-check against `packs.toml` and returns `409` on a mismatch,
 instead of sending anything. A raw body (`{"chemistry", "cells",
 "current_ma", ...}`) skips that check, the same way manual
 `--chemistry`/`--cells` flags do on the CLI.
+
+`/metrics` also reports `charger_last_commanded_info{battery_type,
+cells, mode, pack}`, `charger_last_commanded_timestamp_seconds`, and
+`charger_last_commanded_current_milliamps` whenever a `start` has ever
+been sent - see "Can this identify the battery automatically?" below
+for why this exists and what it does and doesn't mean.
 
 ## Can this identify the battery automatically?
 
@@ -383,6 +399,23 @@ version might:
   add a second pack with the same cell count but different chemistry.
   This is exactly why `packs.toml` is a cross-check against a name YOU
   provide, not an automatic identification system.
+- **Chemistry, once a charge is running**: also no. `GET_CHARGE_INFO`
+  (the only live-status read this protocol has) has no field reporting
+  back what chemistry the charger is currently treating a charge as -
+  confirmed against libb6's own parsing code, which never reads one,
+  and against every byte offset this project has verified on real
+  hardware. The only chemistry information that exists anywhere is
+  what a `start` command itself sent - one-way, host to charger, never
+  echoed back. To make that visible on a dashboard anyway, every
+  `start` (CLI or HTTP) records what it sent to
+  `/tmp/b6charger-ctl-last-start.json`, which `serve` exposes as
+  `charger_last_commanded_info{battery_type, cells, mode, pack}` in
+  `/metrics`. **Read this metric for what it is**: a log of what this
+  tool told the charger to do, labeled honestly as "last commanded",
+  not a confirmation from the charger itself - if you fat-finger
+  `--pack`, this metric will confidently show the wrong thing, exactly
+  as confidently as the charger would if it could report chemistry at
+  all.
 
 ## Protocol notes / findings worth knowing about
 
@@ -399,23 +432,45 @@ version might:
 - **Impedance field**: `GET_CHARGE_INFO`'s response includes a
   per-pack internal-resistance reading (the manual's "Battery Internal
   Resistance Meter" feature) - decoded here as `impedance_mohm`.
-- **STATE 4 discrepancy - unverified**: libb6's `Enum.hh` defines
-  charger state `4` as a second error state (`ERROR_2`); some other
-  B6-family tooling labels it "idle". Unverified which is correct on
-  which firmware. See the `State` enum's docstring in `protocol.py`.
-- **Error-state responses aren't fully specified, and this project
-  doesn't guess at them**: when `state` is `ERROR_1`/`ERROR_2`,
-  `libb6`'s reference implementation reads a 2-byte error code right
-  after the state byte and stops - it never reads
-  capacity/voltage/current/temp/impedance/cells in that case, so
-  there's no verified layout for them to fall back on.
-  `parse_charge_info()` matches that exactly: only `state` and the new
-  `error_code`/`error_name` are populated during an error state,
-  everything else is zeroed rather than assumed. An earlier version of
-  this project guessed that those fields still applied and reported
-  stale, misleading values in production - see
+- **State 2 is IDLE, not an error - libb6's naming was wrong**:
+  `libb6`'s `Enum.hh` names charger state `2` `ERROR_1`, which this
+  project trusted until 2026-08-02. Confirmed wrong via an independent
+  reverse-engineering project (`buxtronix/b6max`, a separately-typed Go
+  implementation) whose own state enum names value `2` `StateIdle` and
+  value `4` `StateError` - i.e. there's only one real error state, not
+  two. This also matched everything already observed independently:
+  the charger's own panel showing nothing wrong while state read `2`,
+  an unmapped `error_code` of `0` decoded there, and the charger
+  booting directly into state `2` with no battery connected. `State`
+  in `protocol.py` now names these `IDLE` (2) and `ERROR` (4).
+- **IDLE responses aren't fully trusted either, for a different
+  reason**: `libb6`'s reference implementation reads a 2-byte error
+  code right after the state byte during `ERROR` and stops - it never
+  reads capacity/voltage/current/temp/impedance/cells in that case, so
+  there's no verified layout for them. `IDLE` gets the same
+  conservative treatment, but not because the layout is unverified -
+  an independent project (`buxtronix/b6max`) decodes idle with the
+  full normal layout, and it may well be correct on genuine SkyRC
+  hardware. On this clone, though, a live test with a real battery
+  connected while idle (2026-08-02) showed `GET_CHARGE_INFO` reporting
+  all-zero pack telemetry anyway - the charger's front panel can read
+  cell voltages directly, but doesn't expose them over this specific
+  command until a charge actually starts. `parse_charge_info()`
+  reflects that: only `state`, `temp_ext_c`/`temp_int_c`, and (ERROR
+  only) `error_code`/`error_name` are populated during IDLE/ERROR,
+  everything pack-derived is zeroed rather than assumed. An earlier
+  version of this project guessed that those fields still applied and
+  reported stale, misleading values in production - see
   [`DRY_RUN.md`](DRY_RUN.md) for the full story and why "zero when
   unknown" is the honest choice.
+- **Cell voltages ARE available while idle - just not from
+  `GET_CHARGE_INFO`**: `GET_SYS_INFO` has its own separate
+  voltage/cell fields, and unlike `GET_CHARGE_INFO`'s, these stay live
+  while idle - confirmed 2026-08-02 with a real pack connected,
+  reading real, gently-drifting values. `/metrics` exposes these as
+  `charger_sysinfo_pack_millivolts`/`charger_sysinfo_cell_millivolts`,
+  separately from the `GET_CHARGE_INFO`-derived `charger_pack_millivolts`/
+  `charger_cell_millivolts` (which stay zero until a charge starts).
 
 ## Safety
 

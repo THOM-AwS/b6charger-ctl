@@ -352,3 +352,110 @@ reports for this field, which may be stale or unpopulated." See
 whether it becomes genuinely live once a charge is actually running)
 is untested - the restart test only proves it's zero at boot and was
 non-zero after a past charge, not when in between it changes.
+
+## State 2 is IDLE, not ERROR_1 - libb6's naming was wrong (2026-08-02)
+
+Independent confirmation, from `buxtronix/b6max` (a separately-typed
+Go reverse-engineering of this same protocol, found via a background
+research pass): its own `State` enum names value `2` `StateIdle` and
+value `4` `StateError` - there is only one real error state, not two.
+This matches everything already observed independently in this
+project: the charger's panel showing nothing wrong while state read
+`2`, an unmapped `error_code` of `0` decoded there, and the charger
+booting directly into state `2` with no battery connected.
+
+`State.ERROR_1`/`ERROR_2` renamed to `IDLE`/`ERROR`. `error_code` is
+now only decoded for the real `ERROR` state - `IDLE` never sets it
+(it isn't an error, so `u16(5)` there isn't one either). The
+pack-telemetry zeroing behaviour is unchanged for both states - see
+the correction below for why IDLE stays conservative despite
+`buxtronix/b6max` decoding it with the full normal layout.
+
+**Consequence found in production**: `ht-infra`'s `ChargerError`
+alert (`charger_state == 2`, severity critical) had been firing as a
+false positive any time the charger was simply idle - likely for a
+long time before this was caught, given how much of this session's
+testing sat in state 2. Fixed to key on state `4`. The Grafana
+dashboard's own `State` panel had the exact same bug independently
+(a value mapping showing `2` as "ERROR" in red, `4` as "IDLE") -
+also fixed, in `dash_battery.json`.
+
+## Self-inflicted incident: manual protocol testing corrupted the live poller (2026-08-02)
+
+While investigating the state-2/chemistry questions above, ran
+`GET_SYS_INFO`, `GET_DEV_INFO`, and `UNK1` by hand against the same
+physical charger the production `b6charger-httpd` service was also
+polling. Immediately after, the production `/metrics` endpoint started
+reporting `charger_temp_internal_celsius=255` and
+`charger_temp_external_celsius=7` - not real readings. Traced byte for
+byte: these are exactly `UNK1`'s raw response bytes at offsets 13/14,
+meaning the production service's `GET_CHARGE_INFO` requests were
+getting back `UNK1`'s stale reply instead of a fresh one. Verified
+precisely (not just "looks similar"): `UNK1`'s own capture has
+`state@4=2`, `temp_ext@13=7`, `temp_int@14=255`, matching the bogus
+live reading exactly.
+
+This survived several recovery attempts that would be reasonable
+first guesses: fresh `GET_CHARGE_INFO` reads (still returned the same
+stale payload, though with a *corrected* header/command byte -
+suggesting whatever's stuck is a data-buffer issue rather than a
+simple reply-queue mismatch), a benign `STOP_CHARGING` (no effect),
+restarting the `b6charger-httpd` *process* (no effect - rules out a
+host-side/Python-level cache, since a fresh process/fd didn't help),
+and physically connecting a battery (no effect). Only a full physical
+power-cycle of the charger cleared it. Root cause not fully
+identified - plausibly the charger firmware's own HID reply buffer not
+being refreshed by every command type, but this is inference, not
+confirmed against firmware source.
+
+**Practical lesson for this project going forward**: don't run ad hoc
+protocol exploration commands against a charger that a production
+poller is also actively polling, even though `HidRawTransport`'s flock
+prevents literal simultaneous device access - it does NOT prevent this
+class of cross-command reply confusion, which is a device/firmware
+behaviour outside this project's control. Use `--fake` or a charger
+with nothing else attached to it for exploratory command testing.
+
+**A useful side effect**: this incident is what proved bytes 33-34 of
+`GET_CHARGE_INFO` (previously an open "maybe this is a hidden field"
+question) are NOT a real field of that command at all. Every one of
+`GET_SYS_INFO`/`GET_DEV_INFO`/`UNK1`'s captures shared the exact same
+trailing content beyond their own declared `LEN`, drawn from whichever
+command had run most recently - i.e. bytes past a command's own
+declared length are stale shared-buffer leftovers, not a hidden
+per-command field. Cross-referencing `buxtronix/b6max`'s own typed
+struct (which also stops at the last cell, and covers only 6 cells vs
+this clone's 8 - meaning bytes 33-34 fall *within* this clone's longer
+declared `LEN` purely because of the extra 2 cells, not because
+they're a real field either) confirms this project's byte layout for
+`GET_CHARGE_INFO` is now cross-checked against 11 independent
+implementations, all agreeing where the real fields end.
+
+## Cell voltages ARE available while idle - via GET_SYS_INFO, not GET_CHARGE_INFO (2026-08-02)
+
+With the stuck-buffer incident above cleared by a power-cycle, and a
+real 3S pack (`youme5200`, per the private `packs.toml` on charger-pi)
+connected and idle (not yet charging, `state=2`), `GET_CHARGE_INFO`
+still read all-zero pack telemetry - consistent with everything found
+above, and now directly confirmed with a real, currently-connected
+pack rather than inferred.
+
+But `GET_SYS_INFO` - a different command, already parsed by this
+project (`parse_sys_info()`) for verifying `set-limits` writes, but
+never wired into `/metrics` - reported real, live data in the exact
+same moment:
+
+```
+voltage_mv: 11139 -> 11140 (three reads, 1s apart)
+cells_mv: (3816, 3831, 3852) -> (3816, 3831, 3852)
+```
+
+Genuinely live (small drift between reads, not the identical-garbage
+signature of the stuck-buffer bug above) and a plausible 3S LiPo
+reading. The charger's own front panel reads cell voltages directly
+for its display - this confirms that same live data IS reachable over
+USB, just from `GET_SYS_INFO`, not `GET_CHARGE_INFO`. `/metrics` was
+updated to expose these as `charger_sysinfo_pack_millivolts`/
+`charger_sysinfo_cell_millivolts`, separately from the
+`GET_CHARGE_INFO`-derived metrics (which stay zero until a charge
+actually starts) - see `httpd.py`'s `render_metrics()`.

@@ -52,7 +52,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler
 
-from b6charger import packs, protocol
+from b6charger import last_start, packs, protocol
 from b6charger.device import Device
 
 log = logging.getLogger("b6charger.httpd")
@@ -131,13 +131,99 @@ class MetricsCache:
             return self._body
 
 
+def _escape_label(value: str) -> str:
+    """Escape a Prometheus label value's backslashes and double quotes."""
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _last_commanded_lines() -> list[str]:
+    """Render the charger_last_commanded_* metrics from last_start.read().
+
+    See last_start.py's module docstring for why this exists: the
+    charger has no field reporting back what chemistry it's currently
+    charging, so this is what WE told it to start with, not a
+    confirmation from the device. Returns an empty list (nothing
+    rendered) if `start` has never been called against this state
+    directory - there's nothing honest to report yet.
+    """
+    entry = last_start.read()
+    if entry is None:
+        return []
+    labels = (
+        f'battery_type="{_escape_label(entry.battery_type)}",'
+        f'cells="{entry.cells}",'
+        f'mode="{_escape_label(entry.mode or "")}",'
+        f'pack="{_escape_label(entry.pack or "")}"'
+    )
+    return [
+        "# HELP charger_last_commanded_info What this tool last told the charger to "
+        "start with - NOT read back from the charger, which has no field for it.",
+        "# TYPE charger_last_commanded_info gauge",
+        f"charger_last_commanded_info{{{labels}}} 1",
+        "# HELP charger_last_commanded_timestamp_seconds Unix time that command was sent.",
+        "# TYPE charger_last_commanded_timestamp_seconds gauge",
+        f"charger_last_commanded_timestamp_seconds {entry.timestamp}",
+        "# HELP charger_last_commanded_current_milliamps Charge current last commanded.",
+        "# TYPE charger_last_commanded_current_milliamps gauge",
+        f"charger_last_commanded_current_milliamps {entry.current_ma}",
+    ]
+
+
+def _sysinfo_lines(device: Device) -> list[str]:
+    """Render charger_sysinfo_* metrics from GET_SYS_INFO.
+
+    A live cell-voltage source GET_CHARGE_INFO doesn't have. Confirmed
+    2026-08-02 (see DRY_RUN.md): GET_CHARGE_INFO's own voltage/cells
+    stay zero while the charger is IDLE, even with a real
+    battery connected - this clone's firmware just doesn't populate
+    them there. GET_SYS_INFO (already parsed by this project for
+    verifying set-limits writes, but never wired into /metrics before)
+    reports live, genuinely-drifting voltage/cells in that same state.
+    Separate metric names from the GET_CHARGE_INFO-derived ones
+    deliberately - they come from a different command and can diverge
+    (e.g. mid-charge, GET_CHARGE_INFO's current/capacity are the
+    authoritative in-session numbers; this is a general system read).
+
+    Failure here is independent of GET_CHARGE_INFO's own success or
+    failure - a separate command, separate try/except, called from
+    both branches of render_metrics().
+    """
+    try:
+        info = device.get_sys_info()
+    except Exception:  # noqa: BLE001 - sysinfo is best-effort, not core to charger_up
+        log.exception("get_sys_info failed")
+        return []
+
+    lines = [
+        "# HELP charger_sysinfo_pack_millivolts Pack voltage from GET_SYS_INFO - "
+        "unlike charger_pack_millivolts, stays live while idle.",
+        "# TYPE charger_sysinfo_pack_millivolts gauge",
+        f"charger_sysinfo_pack_millivolts {info.voltage_mv}",
+    ]
+    if info.cells_mv:
+        lines.append(
+            "# HELP charger_sysinfo_cell_millivolts Per-cell voltage from "
+            "GET_SYS_INFO - stays live while idle."
+        )
+        lines.append("# TYPE charger_sysinfo_cell_millivolts gauge")
+        for i, mv in enumerate(info.cells_mv, 1):
+            lines.append(f'charger_sysinfo_cell_millivolts{{cell="{i}"}} {mv}')
+        lines.append("# HELP charger_sysinfo_cell_count Number of real cells detected.")
+        lines.append("# TYPE charger_sysinfo_cell_count gauge")
+        lines.append(f"charger_sysinfo_cell_count {len(info.cells_mv)}")
+    return lines
+
+
 def render_metrics(device: Device) -> str:
     """Render the full Prometheus text-format /metrics body for `device`.
 
-    Returns `charger_up 0` (and nothing else) if the device can't be
-    read at all, matching Prometheus convention of a present-but-zero
-    `up`-style metric rather than a scrape failure for "device
-    unplugged" - that's an expected, common state, not an error.
+    Returns `charger_up 0` (plus charger_last_commanded_*/
+    charger_sysinfo_*, if any) if GET_CHARGE_INFO can't be read at all,
+    matching Prometheus convention of a present-but-zero `up`-style
+    metric rather than a scrape failure for "device unplugged" - that's
+    an expected, common state, not an error. charger_last_commanded_*/
+    charger_sysinfo_* are included even here since neither depends on
+    GET_CHARGE_INFO succeeding - still useful context either way.
     """
     lines = [
         "# HELP charger_up Whether the charger is connected and answering.",
@@ -148,6 +234,8 @@ def render_metrics(device: Device) -> str:
     except Exception:  # noqa: BLE001 - any failure here means charger_up 0
         log.exception("get_charge_info failed")
         lines.append("charger_up 0")
+        lines += _last_commanded_lines()
+        lines += _sysinfo_lines(device)
         return "\n".join(lines) + "\n"
 
     lines.append("charger_up 1")
@@ -159,8 +247,8 @@ def render_metrics(device: Device) -> str:
     ]
     if info.error_code is not None:
         lines += [
-            f"# HELP charger_error_code Error code while state is ERROR_1/ERROR_2 "
-            f"({info.error_name}). Only present in an error state.",
+            f"# HELP charger_error_code Error code while state is ERROR "
+            f"({info.error_name}). Only present in the ERROR state.",
             "# TYPE charger_error_code gauge",
             f"charger_error_code {info.error_code}",
         ]
@@ -201,6 +289,8 @@ def render_metrics(device: Device) -> str:
         lines.append("# TYPE charger_cell_spread_millivolts gauge")
         lines.append(f"charger_cell_spread_millivolts {max(cells) - min(cells)}")
 
+    lines += _last_commanded_lines()
+    lines += _sysinfo_lines(device)
     return "\n".join(lines) + "\n"
 
 
@@ -318,6 +408,8 @@ def make_handler(
                 profile.charge_current_ma,
             )
             device.start_charging(profile)
+            if not device.dry_run:
+                last_start.record(profile, pack=body.get("pack"))
             self._json(200, {"ok": True})
 
         def _build_profile_from_raw_body(self, body: dict) -> protocol.ChargeProfile | None:

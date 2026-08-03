@@ -180,13 +180,13 @@ class FakeChargerTransport:
         self.pack_voltage_mv = sum(self.cells_mv)
         self.capacity_mah = 0
         self.elapsed_s = 0
-        #: Only meaningful (and only encoded) when `state` is ERROR_1/
-        #: ERROR_2 - see protocol.py's parse_charge_info() docstring for
-        #: why nothing past state+error_code+temp is encoded in that case.
+        #: Only meaningful (and only encoded) when `state` is ERROR -
+        #: see protocol.py's parse_charge_info() docstring for why
+        #: nothing past state+error_code+temp is encoded in that case.
         self.error_code: int | None = None
         #: Charger-hardware sensor readings - encoded (and decoded) in
-        #: every state, including ERROR_1/ERROR_2, unlike the
-        #: pack-derived fields above. See protocol.py's parse_charge_info().
+        #: every state, including IDLE/ERROR, unlike the pack-derived
+        #: fields above. See protocol.py's parse_charge_info().
         self.temp_ext_c = 0
         self.temp_int_c = 25
         self.last_profile: protocol.ChargeProfile | None = None
@@ -253,21 +253,22 @@ class FakeChargerTransport:
         """Encode current state as a GET_CHARGE_INFO response frame.
 
         Mirrors real hardware behaviour (per libb6's Device.cc, plus a
-        live no-battery ERROR_1 capture confirming this - see
-        DRY_RUN.md) when `state` is an error state: the state byte, a
-        2-byte error code at offset 5-6, and temp_ext_c/temp_int_c at
-        offset 13-14 are populated (charger-hardware sensors, not pack
-        telemetry); everything else stays zeroed - there's no verified
-        real layout for the pack-derived fields to simulate.
+        live no-battery IDLE capture confirming this - see DRY_RUN.md)
+        when `state` is IDLE or ERROR: the state byte, temp_ext_c/
+        temp_int_c at offset 13-14, and (ERROR only) a 2-byte error
+        code at offset 5-6 are populated (charger-hardware sensors, not
+        pack telemetry); everything else stays zeroed - there's no
+        verified real layout for the pack-derived fields to simulate.
         """
         buf = bytearray(64)
         buf[0] = 0x0F
         buf[2] = protocol.Cmd.GET_CHARGE_INFO
         buf[4] = int(self.state)
 
-        if self.state in (protocol.State.ERROR_1, protocol.State.ERROR_2):
-            code = self.error_code if self.error_code is not None else 0xFFFF
-            buf[5], buf[6] = divmod(code, 256)
+        if self.state in (protocol.State.IDLE, protocol.State.ERROR):
+            if self.state == protocol.State.ERROR:
+                code = self.error_code if self.error_code is not None else 0xFFFF
+                buf[5], buf[6] = divmod(code, 256)
             buf[13] = self.temp_ext_c
             buf[14] = self.temp_int_c
             return bytes(buf)

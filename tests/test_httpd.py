@@ -72,7 +72,8 @@ def test_default_host_is_wide_open_by_design():
 # --- metrics rendering -------------------------------------------------
 
 
-def test_render_metrics_reports_charger_up_1_and_core_fields():
+def test_render_metrics_reports_charger_up_1_and_core_fields(tmp_path, monkeypatch):
+    monkeypatch.setattr("b6charger.last_start.DEFAULT_PATH", str(tmp_path / "last_start.json"))
     device = Device(FakeChargerTransport())
     body = render_metrics(device)
     assert "charger_up 1" in body
@@ -82,19 +83,26 @@ def test_render_metrics_reports_charger_up_1_and_core_fields():
     assert "charger_impedance_milliohms 12" in body
 
 
-def test_render_metrics_includes_error_code_only_in_error_state():
+def test_render_metrics_includes_error_code_only_in_error_state(tmp_path, monkeypatch):
     from b6charger import protocol
 
+    monkeypatch.setattr("b6charger.last_start.DEFAULT_PATH", str(tmp_path / "last_start.json"))
     device = Device(FakeChargerTransport())
     assert "charger_error_code" not in render_metrics(device)
 
-    device._t.state = protocol.State.ERROR_1
+    device._t.state = protocol.State.ERROR
     device._t.error_code = protocol.Error.NO_BATTERY
     body = render_metrics(device)
     assert "charger_error_code 14" in body  # NO_BATTERY = 0x000E = 14
 
 
-def test_render_metrics_reports_charger_up_0_on_failure():
+def test_render_metrics_reports_charger_up_0_on_failure(tmp_path, monkeypatch):
+    # Isolated from the real DEFAULT_PATH so this test doesn't depend on
+    # whatever last_start.json (if any) happens to exist on the host
+    # running it - see the charger_last_commanded_* tests below for why
+    # that file can be non-empty.
+    monkeypatch.setattr("b6charger.last_start.DEFAULT_PATH", str(tmp_path / "last_start.json"))
+
     class BrokenTransport:
         def transact(self, frame, n=64):
             raise OSError("no such device")
@@ -103,6 +111,106 @@ def test_render_metrics_reports_charger_up_0_on_failure():
     body = render_metrics(device)
     assert body.strip().endswith("charger_up 0")
     assert "charger_state" not in body
+
+
+# --- charger_last_commanded_* - what WE told the charger, not a --------
+# --- confirmation from it (see last_start.py) ---------------------------
+
+
+def test_render_metrics_omits_last_commanded_when_nothing_recorded(tmp_path, monkeypatch):
+    monkeypatch.setattr("b6charger.last_start.DEFAULT_PATH", str(tmp_path / "last_start.json"))
+    device = Device(FakeChargerTransport())
+    assert "charger_last_commanded" not in render_metrics(device)
+
+
+def test_render_metrics_includes_last_commanded_when_recorded(tmp_path, monkeypatch):
+    from b6charger import last_start, protocol
+
+    monkeypatch.setattr("b6charger.last_start.DEFAULT_PATH", str(tmp_path / "last_start.json"))
+    profile = protocol.lipo_profile(
+        cell_count=4,
+        charge_current_ma=1000,
+        mode=protocol.ChargingModeLi.BALANCE,
+        hv=True,
+    )
+    last_start.record(profile, pack="hvpack4s")
+
+    device = Device(FakeChargerTransport())
+    body = render_metrics(device)
+    assert 'battery_type="LIHV"' in body
+    assert 'cells="4"' in body
+    assert 'pack="hvpack4s"' in body
+    assert "charger_last_commanded_current_milliamps 1000" in body
+
+
+def test_render_metrics_includes_last_commanded_even_when_charger_up_0(tmp_path, monkeypatch):
+    from b6charger import last_start, protocol
+
+    monkeypatch.setattr("b6charger.last_start.DEFAULT_PATH", str(tmp_path / "last_start.json"))
+    profile = protocol.lipo_profile(
+        cell_count=3,
+        charge_current_ma=1500,
+        mode=protocol.ChargingModeLi.BALANCE,
+    )
+    last_start.record(profile, pack=None)
+
+    class BrokenTransport:
+        def transact(self, frame, n=64):
+            raise OSError("no such device")
+
+    device = Device(BrokenTransport())
+    body = render_metrics(device)
+    assert "charger_up 0" in body
+    assert 'battery_type="LIPO"' in body
+
+
+# --- charger_sysinfo_* - live voltage/cells from GET_SYS_INFO, unlike ---
+# --- GET_CHARGE_INFO's own fields these stay populated while idle -------
+
+
+def test_render_metrics_includes_sysinfo_pack_voltage_and_cells(tmp_path, monkeypatch):
+    monkeypatch.setattr("b6charger.last_start.DEFAULT_PATH", str(tmp_path / "last_start.json"))
+    device = Device(FakeChargerTransport())
+    body = render_metrics(device)
+    assert "charger_sysinfo_pack_millivolts 11403" in body  # 3800+3805+3798
+    assert 'charger_sysinfo_cell_millivolts{cell="1"} 3800' in body
+    assert "charger_sysinfo_cell_count 3" in body
+
+
+def test_render_metrics_includes_sysinfo_even_when_charger_up_0(tmp_path, monkeypatch):
+    monkeypatch.setattr("b6charger.last_start.DEFAULT_PATH", str(tmp_path / "last_start.json"))
+
+    class SysInfoOnlyTransport:
+        def __init__(self):
+            self._fake = FakeChargerTransport()
+
+        def transact(self, frame, n=64):
+            if frame[2] == 0x55:  # GET_CHARGE_INFO - simulate unreachable
+                raise OSError("no such device")
+            return self._fake.transact(frame, n)
+
+    device = Device(SysInfoOnlyTransport())
+    body = render_metrics(device)
+    assert "charger_up 0" in body
+    assert "charger_sysinfo_pack_millivolts 11403" in body
+
+
+def test_render_metrics_omits_sysinfo_cells_when_sysinfo_itself_fails(tmp_path, monkeypatch):
+    monkeypatch.setattr("b6charger.last_start.DEFAULT_PATH", str(tmp_path / "last_start.json"))
+
+    class ChargeInfoOnlyTransport:
+        def __init__(self):
+            self._fake = FakeChargerTransport()
+
+        def transact(self, frame, n=64):
+            if frame[2] == 0x5A:  # GET_SYS_INFO - simulate unreachable
+                raise OSError("no such device")
+            return self._fake.transact(frame, n)
+
+    device = Device(ChargeInfoOnlyTransport())
+    body = render_metrics(device)
+    assert "charger_up 1" in body  # GET_CHARGE_INFO still worked
+    assert "charger_sysinfo" not in body
 
 
 # --- MetricsCache --------------------------------------------------
@@ -308,3 +416,40 @@ def test_post_start_with_pack_is_also_blocked_without_enable_writes(
     with pytest.raises(urllib.error.HTTPError) as exc_info:
         urllib.request.urlopen(req)
     assert exc_info.value.code == 403
+
+
+def test_post_start_records_last_start_with_pack_name(running_server, tmp_path, monkeypatch):
+    from b6charger import last_start
+
+    monkeypatch.setattr("b6charger.last_start.DEFAULT_PATH", str(tmp_path / "last_start.json"))
+    _write_test_registry(tmp_path, monkeypatch)
+    base_url = running_server(enable_writes=True)
+
+    body = json.dumps({"pack": "matches_fake"}).encode()
+    req = urllib.request.Request(f"{base_url}/start", data=body, method="POST")
+    with urllib.request.urlopen(req) as resp:
+        assert resp.status == 200
+
+    entry = last_start.read()
+    assert entry is not None
+    assert entry.pack == "matches_fake"
+    assert entry.battery_type == "LIPO"
+
+
+def test_post_start_with_raw_body_records_last_start_with_no_pack(
+    running_server, tmp_path, monkeypatch
+):
+    from b6charger import last_start
+
+    monkeypatch.setattr("b6charger.last_start.DEFAULT_PATH", str(tmp_path / "last_start.json"))
+    base_url = running_server(enable_writes=True)
+
+    body = json.dumps({"chemistry": "lihv", "cells": 4, "current_ma": 1000}).encode()
+    req = urllib.request.Request(f"{base_url}/start", data=body, method="POST")
+    with urllib.request.urlopen(req) as resp:
+        assert resp.status == 200
+
+    entry = last_start.read()
+    assert entry is not None
+    assert entry.pack is None
+    assert entry.battery_type == "LIHV"

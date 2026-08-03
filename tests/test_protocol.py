@@ -166,30 +166,32 @@ def test_parse_charge_info_filters_out_floating_pin_noise_above_max():
     assert info.cells_mv == (4197, 4201, 4192)
 
 
-def test_parse_charge_info_zeroes_pack_telemetry_but_not_temp_in_error_state():
+def test_parse_charge_info_zeroes_pack_telemetry_but_not_temp_in_idle_state():
     # Observed 2026-08-02: with no battery physically connected, the
-    # charger's own panel showed nothing wrong, but the raw response
-    # still carried a stale non-zero pack voltage/current from before
-    # disconnection while charger_state read as an error. libb6's
-    # Device.cc confirms it never reads anything past the error code in
-    # this case - so neither do we, rather than guessing, for the
-    # pack-derived fields. See DRY_RUN.md.
+    # charger's own panel showed nothing wrong, and charger_state read
+    # 2 - originally (wrongly) trusted as libb6's ERROR_1, corrected
+    # the same day to IDLE once an independent project (buxtronix/
+    # b6max) confirmed 2 means Idle, not error - see DRY_RUN.md. The
+    # raw response still carried stale non-zero pack voltage/current
+    # from before disconnection despite genuinely being idle, which is
+    # why pack-derived fields stay conservatively zeroed here rather
+    # than guessed at.
     from b6charger.transport import FakeChargerTransport
 
     fake = FakeChargerTransport()
-    fake.state = protocol.State.ERROR_1
-    fake.error_code = protocol.Error.BATTERY_FULL
+    fake.state = protocol.State.IDLE
     # even if the fake's other fields hold stale-looking data, none of
-    # it should be encoded/decoded while in an error state:
+    # it should be encoded/decoded while idle:
     fake.cells_mv = (4197, 4201, 4192)
     fake.pack_voltage_mv = 12605
     fake.current_ma = 292
     fake.temp_int_c = 24  # matches the live no-battery capture in DRY_RUN.md
 
     info = protocol.parse_charge_info(fake._encode_charge_info())
-    assert info.state_name == "ERROR_1"
-    assert info.error_code == protocol.Error.BATTERY_FULL
-    assert info.error_name == "BATTERY_FULL"
+    assert info.state_name == "IDLE"
+    # IDLE isn't an error - it must not get an error_code, unlike ERROR:
+    assert info.error_code is None
+    assert info.error_name is None
     assert info.cells_mv == ()
     assert info.voltage_mv == 0
     assert info.current_ma == 0
@@ -197,15 +199,30 @@ def test_parse_charge_info_zeroes_pack_telemetry_but_not_temp_in_error_state():
     assert info.time_s == 0
     assert info.impedance_mohm == 0
     # unlike the pack-derived fields above, temp is a charger-hardware
-    # sensor reading and IS decoded even in an error state:
+    # sensor reading and IS decoded even while idle:
     assert info.temp_int_c == 24
+
+
+def test_parse_charge_info_decodes_error_code_only_in_error_state():
+    from b6charger.transport import FakeChargerTransport
+
+    fake = FakeChargerTransport()
+    fake.state = protocol.State.ERROR
+    fake.error_code = protocol.Error.BATTERY_FULL
+
+    info = protocol.parse_charge_info(fake._encode_charge_info())
+    assert info.state_name == "ERROR"
+    assert info.error_code == protocol.Error.BATTERY_FULL
+    assert info.error_name == "BATTERY_FULL"
+    assert info.cells_mv == ()
+    assert info.voltage_mv == 0
 
 
 def test_parse_charge_info_reports_unknown_error_name_for_unmapped_code():
     from b6charger.transport import FakeChargerTransport
 
     fake = FakeChargerTransport()
-    fake.state = protocol.State.ERROR_2
+    fake.state = protocol.State.ERROR
     fake.error_code = 0x1234  # not in the Error enum
 
     info = protocol.parse_charge_info(fake._encode_charge_info())
