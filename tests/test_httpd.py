@@ -335,7 +335,8 @@ def test_start_and_stop_return_403_without_enable_writes(running_server):
     assert exc_info.value.code == 403
 
 
-def test_start_and_stop_work_with_enable_writes(running_server):
+def test_start_and_stop_work_with_enable_writes(running_server, monkeypatch):
+    monkeypatch.setattr("b6charger.device.time.sleep", lambda _s: None)
     base_url = running_server(enable_writes=True)
     body = json.dumps({"chemistry": "lipo", "cells": 3, "current_ma": 1500}).encode()
 
@@ -378,6 +379,7 @@ def _write_test_registry(tmp_path, monkeypatch) -> None:
 
 
 def test_post_start_with_matching_pack_succeeds(running_server, tmp_path, monkeypatch):
+    monkeypatch.setattr("b6charger.device.time.sleep", lambda _s: None)
     _write_test_registry(tmp_path, monkeypatch)
     base_url = running_server(enable_writes=True)
 
@@ -396,6 +398,7 @@ def test_post_start_with_pack_succeeds_while_idle_using_sysinfo_cells(
     # this must pass using GET_SYS_INFO's cells, not GET_CHARGE_INFO's.
     from b6charger import protocol
 
+    monkeypatch.setattr("b6charger.device.time.sleep", lambda _s: None)
     _write_test_registry(tmp_path, monkeypatch)
     fake = FakeChargerTransport()
     fake.state = protocol.State.IDLE
@@ -466,6 +469,7 @@ def test_post_start_records_last_start_with_pack_name(running_server, tmp_path, 
     from b6charger import last_start
 
     monkeypatch.setattr("b6charger.last_start.DEFAULT_PATH", str(tmp_path / "last_start.json"))
+    monkeypatch.setattr("b6charger.device.time.sleep", lambda _s: None)
     _write_test_registry(tmp_path, monkeypatch)
     base_url = running_server(enable_writes=True)
 
@@ -486,9 +490,13 @@ def test_post_start_with_raw_body_records_last_start_with_no_pack(
     from b6charger import last_start
 
     monkeypatch.setattr("b6charger.last_start.DEFAULT_PATH", str(tmp_path / "last_start.json"))
+    monkeypatch.setattr("b6charger.device.time.sleep", lambda _s: None)
     base_url = running_server(enable_writes=True)
 
-    body = json.dumps({"chemistry": "lihv", "cells": 4, "current_ma": 1000}).encode()
+    # cells=3 matches FakeChargerTransport's default 3-cell setup, so
+    # the post-start confirmation (checking live cells against what was
+    # requested) actually passes.
+    body = json.dumps({"chemistry": "lihv", "cells": 3, "current_ma": 1000}).encode()
     req = urllib.request.Request(f"{base_url}/start", data=body, method="POST")
     with urllib.request.urlopen(req) as resp:
         assert resp.status == 200

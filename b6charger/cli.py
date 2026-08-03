@@ -93,7 +93,9 @@ def _cmd_status(args: argparse.Namespace) -> None:
     print(f"pack:       {info.voltage_mv / 1000:.3f}V")
     print(f"current:    {info.current_ma / 1000:.3f}A")
     print(f"capacity:   {info.capacity_mah}mAh in {info.time_s}s")
-    print(f"temp:       int={info.temp_int_c}C ext={info.temp_ext_c}C")
+    temp_int = f"{info.temp_int_c}C" if info.temp_int_c is not None else "unknown"
+    temp_ext = f"{info.temp_ext_c}C" if info.temp_ext_c is not None else "unknown"
+    print(f"temp:       int={temp_int} ext={temp_ext}")
     print(f"impedance:  {info.impedance_mohm}mOhm")
     for i, mv in enumerate(info.cells_mv, 1):
         print(f"  cell {i}:   {mv / 1000:.3f}V")
@@ -189,9 +191,12 @@ def _confirm_and_send_start(
     through (manual flags or --pack), so the confirmation behaviour
     can't accidentally diverge between them.
 
-    Records the profile via last_start.record() on a real send only -
-    not under --dry-run, since nothing was actually commanded then and
-    recording it would misrepresent what the charger was told to do.
+    Uses start_charging_verified() (see device.py), not start_charging()
+    directly - a passing pre-start check doesn't guarantee the charger
+    actually accepted the command, only that a plausible pack was
+    connected before it was sent. Records the profile via
+    last_start.record() only once the charger has confirmed it's
+    actually charging - not merely sent, and not under --dry-run.
     """
     print("About to send START with:")
     print(f"  battery_type = {profile.battery_type.name}")
@@ -201,16 +206,24 @@ def _confirm_and_send_start(
     print(f"  discharge_voltage= {profile.cell_discharge_voltage_mv}mV/cell")
     if dev.dry_run:
         print("(--dry-run: nothing will be sent)")
-        dev.start_charging(profile)
+        dev.start_charging_verified(profile)
         return
     if not args.yes:
         reply = input("Send this to the charger? [y/N] ")
         if reply.strip().lower() != "y":
             print("aborted")
             sys.exit(1)
-    dev.start_charging(profile)
-    last_start.record(profile, pack=pack_name)
-    print("sent.")
+    result = dev.start_charging_verified(profile)
+    if result.confirmed:
+        last_start.record(profile, pack=pack_name)
+        print(
+            f"sent and confirmed: {result.info.state_name}, "
+            f"{len(result.info.cells_mv)} cells, "
+            f"{result.info.voltage_mv / 1000:.3f}V"
+        )
+    else:
+        print(f"error: {result.reason} - sent STOP_CHARGING as a precaution.", file=sys.stderr)
+        sys.exit(1)
 
 
 def _resolve_pack_and_current(args: argparse.Namespace) -> tuple[Pack | None, int]:

@@ -9,11 +9,31 @@ nothing" possible everywhere at once.
 from __future__ import annotations
 
 import logging
+import time
+from dataclasses import dataclass
 
 from b6charger import protocol
 from b6charger.transport import Transport
 
 log = logging.getLogger("b6charger.device")
+
+#: How long to wait after START_CHARGING before the first confirmation
+#: read, and how long to wait before a single retry if that read is
+#: ambiguous. Not user-tunable (yet) - these are best-guess defaults,
+#: not measured against how long this hardware actually takes to
+#: register a new state. See Device.start_charging_verified().
+DEFAULT_CONFIRM_DELAY_S = 3.0
+DEFAULT_RETRY_DELAY_S = 2.0
+
+
+@dataclass(frozen=True)
+class StartVerification:
+    """Result of start_charging_verified(): did the charger actually confirm it started."""
+
+    confirmed: bool
+    info: protocol.ChargeInfo
+    stopped: bool
+    reason: str | None
 
 
 class Device:
@@ -72,6 +92,92 @@ class Device:
     def stop_charging(self) -> None:
         """Send STOP_CHARGING (no-op in dry_run mode)."""
         self._send(protocol.build_stop_charging(), "STOP")
+
+    def start_charging_verified(
+        self,
+        profile: protocol.ChargeProfile,
+        confirm_delay_s: float = DEFAULT_CONFIRM_DELAY_S,
+        retry_delay_s: float = DEFAULT_RETRY_DELAY_S,
+    ) -> StartVerification | None:
+        """Send START_CHARGING, then verify the charger actually accepted it.
+
+        The pre-start pack/cell-count check (packs.check_cell_count,
+        via GET_SYS_INFO) confirms a plausible pack is connected BEFORE
+        sending anything, but a passing pre-check doesn't guarantee the
+        charger actually did anything with the START_CHARGING command
+        that follows - confirmed possible even with fully correct code,
+        see DRY_RUN.md. This closes that loop.
+
+        Returns None in dry_run mode - nothing was sent, so there's
+        nothing to verify. Otherwise: waits `confirm_delay_s`, reads
+        GET_CHARGE_INFO, and checks state==CHARGING with a live cell
+        count matching `profile.cell_count`.
+
+        An explicit ERROR state from the charger (e.g.
+        CELL_NUMBER_INCORRECT - a real, protocol-defined error code,
+        see protocol.Error) is treated as immediately authoritative:
+        the charger has its own preflight validation, so there's no
+        reason to second-guess it with a retry - STOP_CHARGING is sent
+        right away. Any other non-matching read (still IDLE, wrong
+        cell count, no error reported) gets exactly ONE retry after
+        `retry_delay_s` before concluding a genuine mismatch and
+        stopping - this guards specifically against a single transient
+        bad read causing an unnecessary abort of an otherwise-fine
+        charge, not against a real fault the charger itself reports.
+        """
+        self.start_charging(profile)
+        if self.dry_run:
+            return None
+
+        time.sleep(confirm_delay_s)
+        info = self.get_charge_info()
+        result = self._evaluate_start(info, profile)
+        if result is not None:
+            return result
+
+        time.sleep(retry_delay_s)
+        info = self.get_charge_info()
+        result = self._evaluate_start(info, profile)
+        if result is not None:
+            return result
+
+        self.stop_charging()
+        return StartVerification(
+            confirmed=False,
+            info=info,
+            stopped=True,
+            reason=(
+                f"charger did not confirm charging after "
+                f"{confirm_delay_s + retry_delay_s:.0f}s (state={info.state_name}, "
+                f"cells detected={len(info.cells_mv)}, expected={profile.cell_count})"
+            ),
+        )
+
+    def _evaluate_start(
+        self, info: protocol.ChargeInfo, profile: protocol.ChargeProfile
+    ) -> StartVerification | None:
+        """Definitively resolve a post-start read, or None if it needs a retry.
+
+        Returns a confirmed StartVerification on success. On an
+        explicit ERROR state, stops immediately and returns a failed
+        StartVerification WITHOUT retrying - see start_charging_verified's
+        docstring for why an explicit error is treated differently from
+        an ambiguous non-matching read. Returns None (caller should
+        retry once) for anything else that doesn't yet match.
+        """
+        if info.state == protocol.State.CHARGING and len(info.cells_mv) == profile.cell_count:
+            return StartVerification(confirmed=True, info=info, stopped=False, reason=None)
+
+        if info.state == protocol.State.ERROR:
+            self.stop_charging()
+            return StartVerification(
+                confirmed=False,
+                info=info,
+                stopped=True,
+                reason=f"charger reported an error: {info.error_name} ({info.error_code})",
+            )
+
+        return None
 
     # --- system settings ---------------------------------------------
 

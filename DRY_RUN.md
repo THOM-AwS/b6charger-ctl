@@ -493,3 +493,110 @@ no-battery-near-zero behaviour already proven for `GET_CHARGE_INFO`
 should carry over - but this is inference from a shared code path, not
 a separate confirmed test. Worth doing if a genuinely no-battery
 moment is convenient to check.
+
+## Feature: post-start verification, closing the "sent != confirmed" gap (2026-08-03)
+
+Trying `start --pack youme5200` against real hardware (with the
+`GET_SYS_INFO` fix above already deployed) surfaced a real gap:
+the pre-start check passed on one attempt but the command still
+appeared to not take effect, and on a later attempt the pre-start
+check itself returned 0 cells despite `b6ctl sysinfo` showing 3 real
+cells moments later via the identical code path. Root cause was the
+still-active stuck-buffer corruption from the self-inflicted incident
+above (not yet cleared by a restart at that point) - but the
+underlying gap was real regardless: `start_charging()` sent a command
+and declared "sent." with no confirmation the charger actually did
+anything with it.
+
+**Fix**: `Device.start_charging_verified()` (device.py) sends
+`START_CHARGING`, waits, then re-reads `GET_CHARGE_INFO` to confirm
+`state == CHARGING` with the expected cell count. An explicit `ERROR`
+state from the charger (it has its own preflight - e.g.
+`CELL_NUMBER_INCORRECT` is a real, protocol-defined code) is treated
+as immediately authoritative, no retry - the charger's own validation
+doesn't need second-guessing. Any other non-matching read gets exactly
+one retry after a short delay before concluding a genuine mismatch and
+sending `STOP_CHARGING` - this guards against a single transient bad
+read (proven possible today, independent of this bug) causing an
+unnecessary abort of an otherwise-fine charge, without ever leaving a
+send unconfirmed. Both `b6ctl start` and `POST /start` use this now;
+`b6ctl` prints `sent and confirmed: ...` or aborts with a clear reason,
+`POST /start` returns `200 {"confirmed": true, ...}` or
+`409 {"confirmed": false, "stopped": true, "error": ...}`.
+
+## Finding + fix: temp is a session-scoped field, only trustworthy while CHARGING (2026-08-03)
+
+Two rounds to get this right, both from the same underlying
+misunderstanding.
+
+**Round 1**: `parse_charge_info()` decoded `temp_ext_c`/`temp_int_c`
+during IDLE/ERROR unconditionally, on the theory it was a
+charger-hardware sensor independent of pack state (a restart test on
+2026-08-02 had already partly disproven this - temp read `0` right
+after boot, not a plausible value - but the fix at the time was only
+a correction to documented confidence, not a code change).
+
+**Round 2, triggered by a user question** ("go look at the other b6
+charger apps and see where they get their internal temp from... it
+used to work in all cases?"): a background research pass re-checked
+10+ independent implementations and found `buxtronix/b6max`'s own
+README contains a REAL captured example from genuine (non-clone)
+SkyRC IMAX B6AC V2 hardware, while Idle:
+
+```
+State      Time    mAh       Voltage  Current   TempExt  TempInt  Imp ...
+Idle           0       0    8.000v     0.26A     42C       248C      0Ω   20.483v  53.506v ...
+```
+
+`TempInt=248C` and `20-53v` "cell" readings - all physically
+impossible, on hardware with no concurrent access at all (ruling out
+this project's own earlier "cross-command reply confusion" theory as
+the root cause of similar-looking corruption seen here - that
+corruption was real, but this specific symptom - implausible values
+while idle - turns out to be how the whole hardware family behaves,
+not something this project's own concurrent polling caused).
+
+**First fix**: a plausibility filter, `TEMP_MIN_C`/`TEMP_MAX_C` (-20 to
+100), the same pattern `cells_mv` already uses via `CELL_MIN_MV`/
+`CELL_MAX_MV`. `temp_ext_c`/`temp_int_c` became `int | None` on
+`ChargeInfo` - `None` when outside the plausible range, `/metrics`
+omits the metric entirely rather than emit a fake number (matching how
+`charger_error_code` is already conditionally emitted).
+
+**That wasn't enough, confirmed the same day**: with a charge complete
+and the pack disconnected around 15:30, the Grafana dashboard's
+internal-temp panel stayed pinned at a completely plausible-looking
+`24C` for hours afterward - not garbage, just frozen. This is the
+SAME staleness pattern already proven for capacity/voltage/cells (see
+the "stale voltage/current after disconnect" finding above) - except
+for those fields, freezing at the final value IS correct behaviour
+(that's the session's final result, meant to persist). Temp isn't a
+session statistic, though - it reads as a live sensor, so users
+reasonably expect it to track current reality, and a frozen-but-
+plausible value is actively misleading in a way a `0` or an
+implausible `248` never was (you'd immediately distrust `248`; `24`
+looks completely normal).
+
+**Second, complete fix**: `temp_ext_c`/`temp_int_c` are now `None` in
+every state except `CHARGING`, full stop - not just IDLE/ERROR, and
+not merely "if implausible". `COMPLETE` still trusts
+capacity/time/voltage/cells/impedance (legitimate final session
+results, freezing there is correct) but not temp specifically. The
+`TEMP_MIN_C`/`TEMP_MAX_C` filter still applies as defense in depth
+within `CHARGING`, in case a genuinely-live read can also produce
+noise - not yet observed, but not ruled out either.
+
+**Confirmed working end-to-end**: `render_metrics()` correctly omits
+`charger_temp_internal_celsius`/`charger_temp_external_celsius` when
+`ChargeInfo` state isn't `CHARGING`, verified against `--fake` for
+both `COMPLETE` (metric absent) and `CHARGING` (metric present, real
+value) in the same test run.
+
+**Still genuinely unknown, not just unconfirmed**: whether ANY command
+in this protocol has a source for internal/external temperature
+outside an active charge. `GET_SYS_INFO`'s two previously-unexplained
+bytes (offset 15-16) were checked directly on real hardware and read
+`0,0` - not a hidden temp field. No other command in the 10+
+cross-referenced implementations offers an alternative either. As far
+as this project can tell, there simply isn't a live-idle temp source
+on this hardware family, not just this clone.

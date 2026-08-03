@@ -411,35 +411,33 @@ class ChargeInfo:
     guessed at. For ERROR this is because libb6's Device.cc reads the
     error code and then STOPS - it never reads any further fields
     during an error response, so there is no authoritative layout to
-    point at. For IDLE it's a separate, still-open caution: this
-    project's own hardware showed stale leftover data (a real-looking
-    but frozen voltage/current/cells from the prior charge) in this
-    exact state before a restart cleared it - so even though an
-    independent project (buxtronix/b6max) decodes IDLE with the full
-    normal layout, this codebase doesn't trust that yet without its
-    own live-battery-while-idle verification. `error_code` is ONLY set
+    point at. For IDLE it's a separate, confirmed finding, not just
+    caution: this project's own hardware showed stale/implausible data
+    in this exact state, and - independently, on genuine (non-clone)
+    SkyRC hardware - buxtronix/b6max's own README example output shows
+    the identical failure mode while Idle: `TempInt=248C`,
+    `20.483v`/`53.506v` "cell" readings - all physically impossible.
+    Cross-referencing 10+ independent implementations found none that
+    special-case IDLE vs CHARGING for these fields, and none reporting
+    a working live-idle reading. This isn't a clone-specific quirk or
+    something this project's own concurrent access caused - it's how
+    this whole B6 hardware family behaves. `error_code` is ONLY set
     for the real ERROR state - IDLE has no error, decoding u16(5) as
     one there would be actively wrong now that the two are known
     apart. See DRY_RUN.md for the full finding.
 
-    `temp_ext_c`/`temp_int_c` ARE decoded in both IDLE and ERROR, at
-    the same offsets the normal-state parser uses, but the confidence
-    level here is lower than an earlier version of this module
-    claimed: a first no-battery capture (2026-08-02) decoded
-    temp_int_c=24 (plausible) while voltage/current/cells in that same
-    read were confirmed-stale leftovers from the prior charge - read
-    at the time as evidence temp was a live, pack-independent sensor.
-    A physical power-cycle the same day disproved that: post-restart,
-    in the identical state, temp_int_c read 0 - alongside every pack
-    field ALSO freshly zeroed instead of stale. That pattern is much
-    more consistent with temp being populated by firmware only
-    during/after an active charge session (frozen like the other
-    fields, just cleared by the same restart) than with it being an
-    independently-live sensor. Decoded anyway because, unlike
-    voltage/current/cells, nothing in this codebase treats temp as a
-    safety input - a stale-or-zero reading here is a
-    monitoring-accuracy question, not a fire-risk one. See DRY_RUN.md
-    for the full timeline, including this correction.
+    `temp_ext_c`/`temp_int_c` are `None` whenever `state != CHARGING` -
+    confirmed 2026-08-03: unlike capacity/time/voltage/cells (which
+    legitimately freeze at their final value once a charge completes -
+    that's what "final session results" means), temp freezes too, but
+    stays completely plausible-looking while doing it (a real capture
+    read a frozen 24C for hours after the pack was disconnected). A
+    range filter can't catch a frozen-but-plausible value, so temp is
+    only trusted during the one state confirmed genuinely live -
+    CHARGING - regardless of what the raw byte says elsewhere.
+    `TEMP_MIN_C`/`TEMP_MAX_C` (the same plausibility-filter pattern
+    `cells_mv` uses for `CELL_MIN_MV`/`CELL_MAX_MV`) still apply within
+    CHARGING as defense in depth. See DRY_RUN.md for the full timeline.
     """
 
     state: int
@@ -447,8 +445,8 @@ class ChargeInfo:
     time_s: int
     voltage_mv: int
     current_ma: int
-    temp_ext_c: int
-    temp_int_c: int
+    temp_ext_c: int | None
+    temp_int_c: int | None
     impedance_mohm: int
     cells_mv: tuple[int, ...] = field(default_factory=tuple)
     error_code: int | None = None
@@ -487,6 +485,22 @@ def _is_real_cell(mv: int) -> bool:
     return CELL_MIN_MV <= mv <= CELL_MAX_MV
 
 
+TEMP_MIN_C = -20  # below this a decoded temp byte is noise, not a real reading
+TEMP_MAX_C = 100  # above this too - confirmed necessary 2026-08-03: this whole
+# hardware family (including genuine, non-clone SkyRC units - see
+# buxtronix/b6max's own README capture) can return flatly impossible
+# temp bytes (248C observed) while idle, not just stale-but-plausible
+# ones. 100 leaves headroom above the highest configurable temp_limit_c
+# (80, see build_set_temp_limit) for a genuine "about to overheat"
+# reading without excluding it, while still rejecting 248-style noise.
+# See DRY_RUN.md for the live trace.
+
+
+def _plausible_temp(raw_c: int) -> int | None:
+    """Return `raw_c`, or None if it's outside the plausible temp range."""
+    return raw_c if TEMP_MIN_C <= raw_c <= TEMP_MAX_C else None
+
+
 #: States that get the conservative "short frame" decode - state/temp
 #: only, everything pack-derived zeroed/empty. Named for what they
 #: share (no trusted pack telemetry), not for what they mean - only
@@ -511,15 +525,19 @@ def parse_charge_info(resp: bytes) -> ChargeInfo:
     `error_code` is only decoded for ERROR - IDLE isn't an error, so
     u16(5) there isn't one either.
 
-    `temp_ext_c`/`temp_int_c` ARE decoded in both IDLE and ERROR, at
-    the same offsets the normal-state path already trusts - but decode
-    here does not mean "guaranteed live": a same-day physical restart
-    test showed this field reads 0 right after power-on and only a
-    plausible non-zero value once the charger has actually run a
-    charge, suggesting it's populated per-session like the fields
-    above rather than continuously sampled while idle. Decoded anyway
-    since nothing here treats temp as a safety input, unlike
-    voltage/current/cells_mv. See DRY_RUN.md for the full timeline.
+    `temp_ext_c`/`temp_int_c` are ONLY decoded (non-None) when
+    `state == CHARGING` - confirmed 2026-08-03 (see ChargeInfo's
+    docstring and DRY_RUN.md) that temp freezes at whatever it read
+    when the charge session ended, the same as capacity/voltage/cells
+    do. Freezing is CORRECT for those session-summary fields (that's
+    what "final results" means), but temp isn't a session statistic -
+    it reads as a live sensor, so a frozen value is actively
+    misleading rather than merely stale (a live-looking dashboard
+    showing a temperature from hours ago, not now). COMPLETE still
+    trusts capacity/time/voltage/cells/impedance (legitimate final
+    session results) but not temp specifically. `_plausible_temp()`
+    is still applied as defense in depth even within CHARGING, in case
+    genuinely-live reads can also produce noise.
 
     Raises ProtocolError if `resp` isn't shaped like a GET_CHARGE_INFO
     response at all (wrong length or command byte).
@@ -531,6 +549,12 @@ def parse_charge_info(resp: bytes) -> ChargeInfo:
         return (resp[i] << 8) | resp[i + 1]
 
     state = resp[4]
+    if state == State.CHARGING:
+        temp_ext_c = _plausible_temp(resp[13])
+        temp_int_c = _plausible_temp(resp[14])
+    else:
+        temp_ext_c = None
+        temp_int_c = None
 
     if state in (s.value for s in _SHORT_FRAME_STATES):
         return ChargeInfo(
@@ -539,8 +563,8 @@ def parse_charge_info(resp: bytes) -> ChargeInfo:
             time_s=0,
             voltage_mv=0,
             current_ma=0,
-            temp_ext_c=resp[13],
-            temp_int_c=resp[14],
+            temp_ext_c=temp_ext_c,
+            temp_int_c=temp_int_c,
             impedance_mohm=0,
             cells_mv=(),
             error_code=u16(5) if state == State.ERROR else None,
@@ -553,8 +577,8 @@ def parse_charge_info(resp: bytes) -> ChargeInfo:
         time_s=u16(7),
         voltage_mv=u16(9),
         current_ma=u16(11),
-        temp_ext_c=resp[13],
-        temp_int_c=resp[14],
+        temp_ext_c=temp_ext_c,
+        temp_int_c=temp_int_c,
         impedance_mohm=u16(15),
         cells_mv=cells,
     )

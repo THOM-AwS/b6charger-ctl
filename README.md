@@ -243,6 +243,18 @@ b6ctl start --chemistry lipo --cells 3 --current-ma 1500
 | `--dry-run` | (boolean) | off | Build and log the frame (including running the `--pack` cell-count check) but send nothing |
 | `--auto-approve`, `--yes` | (boolean) | off | Skip the interactive confirmation prompt. The profile is always printed first regardless |
 
+**After sending, `start` verifies the charger actually accepted it** -
+a passing pre-flight cell-count check only confirms a plausible pack
+was connected before the command was sent, not that the charger did
+anything with it. A few seconds after `START_CHARGING`, `b6ctl`
+re-reads live status: if the charger confirms it's charging with the
+expected cell count, you'll see `sent and confirmed: ...`. If the
+charger reports an explicit error (e.g. a cell-count mismatch it
+detected itself), or never confirms after one retry, `b6ctl` sends
+`STOP_CHARGING` immediately and exits non-zero rather than leaving you
+uncertain whether a real charge is running. `--dry-run` skips this
+entirely, same as everything else it doesn't send.
+
 `chemistry` values in full, for reference (only `lipo`/`lihv` are
 exposed via this flag - the protocol layer in `protocol.py` also
 supports `LIION`/`LIFE`/`NIMH`/`NICD`/`PB` for anyone extending the
@@ -356,6 +368,33 @@ logged with the caller's address first.
 `GET_CHARGE_INFO`, it just wasn't decoded before. Point Prometheus (or
 `curl`) at `http://<host>:9111/metrics`.
 
+> **Note: several metrics only populate once a charge is actively
+> running.** Confirmed 2026-08-03 against real hardware, in two
+> different ways:
+>
+> - `charger_pack_millivolts`, `charger_current_milliamps`,
+>   `charger_capacity_mah`, `charger_cell_millivolts`, and
+>   `charger_impedance_milliohms` read `0` while idle (even with a
+>   battery connected), then populate normally once charging starts -
+>   and correctly **stay at their final value** after the charge
+>   completes, showing that session's results. That freeze is
+>   intentional/correct: it's the final summary, not a bug.
+> - `charger_temp_internal_celsius`/`charger_temp_external_celsius`
+>   are different: they're **absent entirely (not `0`) any time
+>   `charger_state` isn't `1` (CHARGING)** - including after a charge
+>   completes. Unlike the fields above, a frozen temp reading looks
+>   exactly like a live one (a real capture stayed at a plausible 24C
+>   for hours after the pack was disconnected), so this project treats
+>   it as unavailable rather than risk showing a stale reading as
+>   current. **There is no known way to read temperature outside an
+>   active charge on this hardware family** - not just this clone, see
+>   [Protocol notes](#protocol-notes--findings-worth-knowing-about).
+>
+> Pack voltage and per-cell voltage DO have a working idle-time
+> alternative: the `charger_sysinfo_*` metrics below. Don't mistake a
+> `0` on the plain metrics for "nothing connected" while idle - check
+> `charger_sysinfo_pack_millivolts`/`charger_state` instead.
+
 It also reports `charger_sysinfo_pack_millivolts`/
 `charger_sysinfo_cell_millivolts{cell="N"}`/`charger_sysinfo_cell_count`/
 `charger_sysinfo_cell_spread_millivolts`, sourced from `GET_SYS_INFO`
@@ -467,11 +506,11 @@ version might:
   all-zero pack telemetry anyway - the charger's front panel can read
   cell voltages directly, but doesn't expose them over this specific
   command until a charge actually starts. `parse_charge_info()`
-  reflects that: only `state`, `temp_ext_c`/`temp_int_c`, and (ERROR
-  only) `error_code`/`error_name` are populated during IDLE/ERROR,
-  everything pack-derived is zeroed rather than assumed. An earlier
-  version of this project guessed that those fields still applied and
-  reported stale, misleading values in production - see
+  reflects that: only `state` and (ERROR only) `error_code`/`error_name`
+  are populated during IDLE/ERROR, everything pack-derived (and, as of
+  2026-08-03, temp too - see below) is zeroed rather than assumed. An
+  earlier version of this project guessed that those fields still
+  applied and reported stale, misleading values in production - see
   [`DRY_RUN.md`](DRY_RUN.md) for the full story and why "zero when
   unknown" is the honest choice.
 - **Cell voltages ARE available while idle - just not from
@@ -482,6 +521,25 @@ version might:
   `charger_sysinfo_pack_millivolts`/`charger_sysinfo_cell_millivolts`,
   separately from the `GET_CHARGE_INFO`-derived `charger_pack_millivolts`/
   `charger_cell_millivolts` (which stay zero until a charge starts).
+- **Temp is only trusted while `state == CHARGING`, full stop - not
+  IDLE, not COMPLETE either**: this took two rounds to get right.
+  First (2026-08-02) temp was decoded during IDLE/ERROR as a
+  "charger-hardware sensor, independent of pack state" - a restart
+  test disproved that (it read `0` right after boot, not a plausible
+  value). Then (2026-08-03) a plausibility filter was added
+  (`TEMP_MIN_C`/`TEMP_MAX_C`) after `buxtronix/b6max`'s own README
+  showed genuine SkyRC hardware reading `TempInt=248C` while idle -
+  physically impossible, confirming this isn't a clone quirk. But a
+  filter alone wasn't enough: capacity/voltage/cells legitimately
+  freeze at their final value once a charge completes (that's the
+  correct "final session result"), and it turns out temp freezes
+  there too - except a frozen temp reads as completely plausible,
+  since it's just whatever the real temperature was when charging
+  stopped. A live Grafana dashboard was observed stuck at a real
+  looking `24C` for hours after the pack was disconnected. No range
+  filter can catch "plausible but hours old", so `temp_ext_c`/
+  `temp_int_c` are now `None` in every state except `CHARGING`,
+  regardless of what the raw byte says.
 
 ## Safety
 

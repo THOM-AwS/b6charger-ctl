@@ -298,16 +298,25 @@ def render_metrics(device: Device) -> str:
         "# HELP charger_current_milliamps Charge/discharge current, in milliamps.",
         "# TYPE charger_current_milliamps gauge",
         f"charger_current_milliamps {info.current_ma}",
-        "# HELP charger_temp_internal_celsius Charger's own internal temperature.",
-        "# TYPE charger_temp_internal_celsius gauge",
-        f"charger_temp_internal_celsius {info.temp_int_c}",
-        "# HELP charger_temp_external_celsius External temp probe reading (0 if unplugged).",
-        "# TYPE charger_temp_external_celsius gauge",
-        f"charger_temp_external_celsius {info.temp_ext_c}",
         "# HELP charger_impedance_milliohms Pack internal resistance, in milliohms.",
         "# TYPE charger_impedance_milliohms gauge",
         f"charger_impedance_milliohms {info.impedance_mohm}",
     ]
+    if info.temp_int_c is not None:
+        lines += [
+            "# HELP charger_temp_internal_celsius Charger's own internal temperature. "
+            "Absent when the last reading was outside the plausible range - confirmed "
+            "2026-08-03 that this hardware can return implausible values while idle.",
+            "# TYPE charger_temp_internal_celsius gauge",
+            f"charger_temp_internal_celsius {info.temp_int_c}",
+        ]
+    if info.temp_ext_c is not None:
+        lines += [
+            "# HELP charger_temp_external_celsius External temp probe reading "
+            "(absent if implausible - see charger_temp_internal_celsius HELP).",
+            "# TYPE charger_temp_external_celsius gauge",
+            f"charger_temp_external_celsius {info.temp_ext_c}",
+        ]
 
     cells = info.cells_mv
     if cells:
@@ -440,10 +449,39 @@ def make_handler(
                 profile.cell_count,
                 profile.charge_current_ma,
             )
-            device.start_charging(profile)
-            if not device.dry_run:
+            result = device.start_charging_verified(profile)
+            if device.dry_run:
+                self._json(200, {"ok": True, "dry_run": True})
+                return
+
+            if result.confirmed:
                 last_start.record(profile, pack=body.get("pack"))
-            self._json(200, {"ok": True})
+                self._json(
+                    200,
+                    {
+                        "ok": True,
+                        "confirmed": True,
+                        "state": result.info.state,
+                        "state_name": result.info.state_name,
+                        "cells_mv": list(result.info.cells_mv),
+                        "voltage_mv": result.info.voltage_mv,
+                    },
+                )
+            else:
+                log.warning(
+                    "POST /start from %s sent but not confirmed: %s",
+                    self.client_address[0],
+                    result.reason,
+                )
+                self._json(
+                    409,
+                    {
+                        "ok": False,
+                        "confirmed": False,
+                        "stopped": result.stopped,
+                        "error": result.reason,
+                    },
+                )
 
         def _build_profile_from_raw_body(self, body: dict) -> protocol.ChargeProfile | None:
             """Build a ChargeProfile from a raw {"chemistry","cells","current_ma",...} body.

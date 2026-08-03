@@ -54,6 +54,7 @@ def test_start_yes_skips_prompt(capsys, monkeypatch):
         raise AssertionError("input() called despite --yes")
 
     monkeypatch.setattr("builtins.input", fail_input)
+    monkeypatch.setattr("b6charger.device.time.sleep", lambda _s: None)
 
     parser = cli.build_parser()
     args = parser.parse_args(
@@ -62,8 +63,11 @@ def test_start_yes_skips_prompt(capsys, monkeypatch):
             "start",
             "--chemistry",
             "lihv",
+            # matches FakeChargerTransport's default 3-cell setup, so the
+            # post-start confirmation (which checks the live cell count
+            # against what was requested) actually passes here.
             "--cells",
-            "4",
+            "3",
             "--current-ma",
             "1000",
             "--yes",
@@ -71,7 +75,7 @@ def test_start_yes_skips_prompt(capsys, monkeypatch):
     )
     args.func(args)
     out = capsys.readouterr().out
-    assert "sent." in out
+    assert "sent and confirmed" in out
     assert "LIHV" in out
 
 
@@ -153,12 +157,13 @@ def test_packs_show_prints_full_pack_detail(tmp_path, monkeypatch, capsys):
 
 
 def test_start_with_pack_using_default_current_succeeds(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr("b6charger.device.time.sleep", lambda _s: None)
     _write_test_registry(tmp_path, monkeypatch)
     parser = cli.build_parser()
     args = parser.parse_args(["--fake", "start", "--pack", "matches_fake", "--yes"])
     args.func(args)
     out = capsys.readouterr().out
-    assert "sent." in out
+    assert "sent and confirmed" in out
     assert "cells        = 3" in out
     assert "charge_current   = 1100mA" in out  # the pack's default_current_ma
 
@@ -176,6 +181,7 @@ def test_start_with_pack_succeeds_while_idle_using_sysinfo_cells(
     from b6charger import protocol
     from b6charger.transport import FakeChargerTransport
 
+    monkeypatch.setattr("b6charger.device.time.sleep", lambda _s: None)
     _write_test_registry(tmp_path, monkeypatch)
     fake = FakeChargerTransport()
     fake.state = protocol.State.IDLE
@@ -184,7 +190,7 @@ def test_start_with_pack_succeeds_while_idle_using_sysinfo_cells(
     parser = cli.build_parser()
     args = parser.parse_args(["--fake", "start", "--pack", "matches_fake", "--yes"])
     args.func(args)
-    assert "sent." in capsys.readouterr().out
+    assert "sent and confirmed" in capsys.readouterr().out
 
 
 def test_start_with_pack_mismatched_cell_count_refuses(tmp_path, monkeypatch, capsys):
@@ -362,6 +368,7 @@ def test_start_yes_records_last_start(tmp_path, monkeypatch, capsys):
     from b6charger import last_start
 
     monkeypatch.setattr("b6charger.last_start.DEFAULT_PATH", str(tmp_path / "last_start.json"))
+    monkeypatch.setattr("b6charger.device.time.sleep", lambda _s: None)
     parser = cli.build_parser()
     args = parser.parse_args(
         [
@@ -369,8 +376,10 @@ def test_start_yes_records_last_start(tmp_path, monkeypatch, capsys):
             "start",
             "--chemistry",
             "lihv",
+            # matches FakeChargerTransport's default 3-cell setup, so the
+            # post-start confirmation actually passes.
             "--cells",
-            "4",
+            "3",
             "--current-ma",
             "1000",
             "--yes",
@@ -381,7 +390,7 @@ def test_start_yes_records_last_start(tmp_path, monkeypatch, capsys):
     entry = last_start.read()
     assert entry is not None
     assert entry.battery_type == "LIHV"
-    assert entry.cells == 4
+    assert entry.cells == 3
     assert entry.current_ma == 1000
     assert entry.pack is None
 
@@ -390,6 +399,7 @@ def test_start_pack_yes_records_the_pack_name(tmp_path, monkeypatch, capsys):
     from b6charger import last_start
 
     monkeypatch.setattr("b6charger.last_start.DEFAULT_PATH", str(tmp_path / "last_start.json"))
+    monkeypatch.setattr("b6charger.device.time.sleep", lambda _s: None)
     _write_test_registry(tmp_path, monkeypatch)
     parser = cli.build_parser()
     args = parser.parse_args(["--fake", "start", "--pack", "matches_fake", "--yes"])
