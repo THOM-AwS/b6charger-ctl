@@ -52,7 +52,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler
 
-from b6charger import last_start, packs, protocol
+from b6charger import charge_request, last_start, packs, protocol
 from b6charger.device import Device
 
 log = logging.getLogger("b6charger.httpd")
@@ -427,11 +427,19 @@ def make_handler(
             except json.JSONDecodeError:
                 self._json(400, {"error": "invalid json body"})
                 return
+            if not isinstance(body, dict):
+                self._json(400, {"error": "json body must be an object"})
+                return
 
             if self.path == "/stop":
                 log.info("POST /stop from %s", self.client_address[0])
-                device.stop_charging()
-                self._json(200, {"ok": True})
+                try:
+                    device.stop_charging()
+                except Exception as e:  # noqa: BLE001 - surface as a clean 502, not a crash
+                    log.exception("stop_charging failed")
+                    self._json(502, {"error": str(e)})
+                    return
+                self._json(200, {"ok": True, "dry_run": device.dry_run})
                 return
 
             if "pack" in body:
@@ -449,7 +457,12 @@ def make_handler(
                 profile.cell_count,
                 profile.charge_current_ma,
             )
-            result = device.start_charging_verified(profile)
+            try:
+                result = device.start_charging_verified(profile)
+            except Exception as e:  # noqa: BLE001 - surface as a clean 502, not a crash
+                log.exception("start_charging_verified failed")
+                self._json(502, {"error": str(e)})
+                return
             if device.dry_run:
                 self._json(200, {"ok": True, "dry_run": True})
                 return
@@ -491,81 +504,51 @@ def make_handler(
             400 response and returns None on any validation failure.
             """
             try:
-                mode = protocol.ChargingModeLi[body.get("mode", "balance").upper()]
-                return protocol.lipo_profile(
-                    cell_count=int(body["cells"]),
-                    charge_current_ma=int(body["current_ma"]),
-                    mode=mode,
-                    hv=(body.get("chemistry") == "lihv"),
-                    discharge_current_ma=int(
-                        body.get(
-                            "discharge_current_ma",
-                            protocol.DEFAULT_DISCHARGE_CURRENT_MA,
-                        )
-                    ),
-                )
-            except (KeyError, ValueError, protocol.ProtocolError) as e:
+                return charge_request.build_raw_profile(body)
+            except charge_request.InvalidStartRequest as e:
                 self._json(400, {"error": f"bad profile: {e}"})
                 return None
 
         def _build_profile_from_pack(self, body: dict) -> protocol.ChargeProfile | None:
             """Build a ChargeProfile from a {"pack": "name", ...} body.
 
-            The HTTP equivalent of `b6ctl start --pack NAME`: looks up
-            the pack, runs the same live cell-count cross-check
-            (packs.check_cell_count), and applies the same max-current
-            ceiling - all as real HTTP error responses instead of exiting
-            the process. Returns None (having already sent an error
-            response) on any failure.
-
-            Reads GET_SYS_INFO for the cell count, not GET_CHARGE_INFO -
-            see cli.py's _check_pack_cell_count_matches_device for why
-            (GET_CHARGE_INFO's cells_mv is always empty while idle on
-            this hardware, which is exactly the state a pre-start check
-            always runs in).
+            The HTTP equivalent of `b6ctl start --pack NAME`: delegates
+            to charge_request.build_pack_profile, the same function
+            `b6ctl start --pack` itself calls, so the two interfaces
+            can't drift apart the way they have before (see
+            charge_request.py's module docstring). This method's own
+            job is only mapping that shared function's typed exceptions
+            to real HTTP error responses instead of exiting a process.
             """
             try:
                 registry = packs.load_registry()
-                pack = registry.get(str(body["pack"]))
             except packs.PackConfigError as e:
                 self._json(400, {"error": str(e)})
                 return None
 
             try:
-                info = device.get_sys_info()
-            except Exception as e:  # noqa: BLE001 - surface to caller, don't swallow
-                log.exception("get_sys_info failed during pack cell-count check")
-                self._json(502, {"error": str(e)})
+                return charge_request.build_pack_profile(
+                    device,
+                    registry,
+                    str(body["pack"]),
+                    current_ma=body.get("current_ma"),
+                    mode=body.get("mode", "balance"),
+                    discharge_current_ma=body.get("discharge_current_ma"),
+                )
+            except packs.PackConfigError as e:
+                self._json(400, {"error": str(e)})
                 return None
-
-            try:
-                packs.check_cell_count(pack, len(info.cells_mv))
             except packs.PackCellMismatch as e:
                 log.warning("rejected POST /start from %s: %s", self.client_address[0], e)
                 self._json(409, {"error": str(e)})
                 return None
-
-            current_ma = int(body.get("current_ma", pack.default_current_ma))
-            if current_ma > pack.max_current_ma:
-                self._json(
-                    400,
-                    {
-                        "error": f"current_ma {current_ma} exceeds pack "
-                        f"'{pack.name}'s max_current_ma ({pack.max_current_ma})"
-                    },
-                )
+            except charge_request.InvalidStartRequest as e:
+                self._json(400, {"error": str(e)})
                 return None
-
-            mode = protocol.ChargingModeLi[body.get("mode", "balance").upper()]
-            return protocol.lipo_profile(
-                cell_count=pack.cells,
-                charge_current_ma=current_ma,
-                mode=mode,
-                hv=pack.is_hv,
-                discharge_current_ma=int(
-                    body.get("discharge_current_ma", protocol.DEFAULT_DISCHARGE_CURRENT_MA)
-                ),
-            )
+            except Exception as e:  # noqa: BLE001 - device I/O failure -> 502, not a crash
+                log.exception("device I/O failed while building a pack-based start profile")
+                self._json(502, {"error": str(e)})
+                return None
 
         def log_message(self, *args) -> None:
             """Suppress BaseHTTPRequestHandler's default stderr access log."""

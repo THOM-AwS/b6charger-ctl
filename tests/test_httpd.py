@@ -505,3 +505,103 @@ def test_post_start_with_raw_body_records_last_start_with_no_pack(
     assert entry is not None
     assert entry.pack is None
     assert entry.battery_type == "LIHV"
+
+
+# --- malformed request bodies must 400, never crash the handler ---------
+
+
+def test_post_start_with_non_dict_body_returns_400(running_server):
+    base_url = running_server(enable_writes=True)
+    for bad_body in (b"[1, 2, 3]", b'"just a string"', b"42", b"null"):
+        req = urllib.request.Request(f"{base_url}/start", data=bad_body, method="POST")
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            urllib.request.urlopen(req)
+        assert exc_info.value.code == 400
+
+
+def test_post_start_with_pack_and_unknown_mode_returns_400_not_crash(
+    running_server, tmp_path, monkeypatch
+):
+    # Regression: _build_profile_from_pack used to parse `mode` with no
+    # try/except at all, unlike the raw-body path - an invalid mode name
+    # raised an uncaught KeyError that crashed the request handler.
+    _write_test_registry(tmp_path, monkeypatch)
+    base_url = running_server(enable_writes=True)
+
+    body = json.dumps({"pack": "matches_fake", "mode": "turbo"}).encode()
+    req = urllib.request.Request(f"{base_url}/start", data=body, method="POST")
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        urllib.request.urlopen(req)
+    assert exc_info.value.code == 400
+    assert "turbo" in json.loads(exc_info.value.read())["error"]
+
+
+def test_post_start_with_pack_and_non_string_mode_returns_400_not_crash(
+    running_server, tmp_path, monkeypatch
+):
+    # Same bug, different trigger: a non-string mode (valid JSON, e.g. a
+    # number) raised an uncaught AttributeError on `.upper()`.
+    _write_test_registry(tmp_path, monkeypatch)
+    base_url = running_server(enable_writes=True)
+
+    body = json.dumps({"pack": "matches_fake", "mode": 7}).encode()
+    req = urllib.request.Request(f"{base_url}/start", data=body, method="POST")
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        urllib.request.urlopen(req)
+    assert exc_info.value.code == 400
+
+
+def test_post_start_with_pack_and_non_numeric_current_ma_returns_400_not_crash(
+    running_server, tmp_path, monkeypatch
+):
+    # Same bug class again: a non-numeric current_ma raised an uncaught
+    # ValueError from the pack path's bare int() call.
+    _write_test_registry(tmp_path, monkeypatch)
+    base_url = running_server(enable_writes=True)
+
+    body = json.dumps({"pack": "matches_fake", "current_ma": "not-a-number"}).encode()
+    req = urllib.request.Request(f"{base_url}/start", data=body, method="POST")
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        urllib.request.urlopen(req)
+    assert exc_info.value.code == 400
+
+
+# --- device I/O failures during a write must 502, never crash the -------
+# --- handler - do_GET already did this; do_POST didn't -------------------
+
+
+def _raising_device() -> Device:
+    class RaisingTransport:
+        def transact(self, frame, n=64):
+            raise OSError("device disconnected")
+
+    return Device(RaisingTransport())
+
+
+def test_post_stop_returns_502_when_device_fails(running_server):
+    base_url = running_server(enable_writes=True, device=_raising_device())
+    req = urllib.request.Request(f"{base_url}/stop", data=b"{}", method="POST")
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        urllib.request.urlopen(req)
+    assert exc_info.value.code == 502
+
+
+def test_post_start_returns_502_when_start_charging_verified_fails(running_server):
+    base_url = running_server(enable_writes=True, device=_raising_device())
+    body = json.dumps({"chemistry": "lipo", "cells": 3, "current_ma": 1500}).encode()
+    req = urllib.request.Request(f"{base_url}/start", data=body, method="POST")
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        urllib.request.urlopen(req)
+    assert exc_info.value.code == 502
+
+
+def test_post_start_with_pack_returns_502_when_get_sys_info_fails(
+    running_server, tmp_path, monkeypatch
+):
+    _write_test_registry(tmp_path, monkeypatch)
+    base_url = running_server(enable_writes=True, device=_raising_device())
+    body = json.dumps({"pack": "matches_fake"}).encode()
+    req = urllib.request.Request(f"{base_url}/start", data=body, method="POST")
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        urllib.request.urlopen(req)
+    assert exc_info.value.code == 502

@@ -32,9 +32,9 @@ import logging
 import sys
 from http.server import ThreadingHTTPServer
 
-from b6charger import httpd, last_start, packs, protocol
+from b6charger import charge_request, httpd, last_start, packs, protocol
 from b6charger.device import Device
-from b6charger.packs import Pack, PackConfigError
+from b6charger.packs import PackConfigError
 from b6charger.transport import (
     DeviceTimeout,
     FakeChargerTransport,
@@ -226,14 +226,16 @@ def _confirm_and_send_start(
         sys.exit(1)
 
 
-def _resolve_pack_and_current(args: argparse.Namespace) -> tuple[Pack | None, int]:
-    """Resolve which pack (if any) and charge current `start` should use.
+def _validate_start_args(args: argparse.Namespace) -> None:
+    """Validate the --pack vs manual-flags argument combination for `start`.
 
-    Validates the --pack vs manual-flags combination from the parsed
-    args and returns (pack_or_None, charge_current_ma). Exits with a
-    friendly message on any invalid combination (both --pack and
-    --chemistry given, or --pack with no --current-ma override and no
-    registry default available) rather than raising.
+    Exits with a friendly message on any invalid combination (both
+    --pack and --chemistry/--cells given, or neither a pack nor manual
+    chemistry/cells given, or manual flags without --current-ma).
+    This is pure argument-shape validation, CLI-specific and not shared
+    with httpd.py - the actual pack lookup, live cell-count check, and
+    current ceiling are enforced identically for both interfaces by
+    charge_request.build_pack_profile.
     """
     if args.pack and (args.chemistry or args.cells is not None):
         print(
@@ -243,27 +245,8 @@ def _resolve_pack_and_current(args: argparse.Namespace) -> tuple[Pack | None, in
             file=sys.stderr,
         )
         sys.exit(1)
-
     if args.pack:
-        try:
-            registry = packs.load_registry()
-            pack = registry.get(args.pack)
-        except PackConfigError as e:
-            print(f"error: {e}", file=sys.stderr)
-            sys.exit(1)
-        current_ma = (
-            args.current_ma if args.current_ma is not None else pack.default_current_ma
-        )
-        if current_ma > pack.max_current_ma:
-            print(
-                f"error: --current-ma {current_ma} exceeds pack '{pack.name}'s "
-                f"max_current_ma ({pack.max_current_ma}) - lower it or edit "
-                "packs.toml if that ceiling is genuinely wrong",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        return pack, current_ma
-
+        return
     if not args.chemistry or args.cells is None:
         print(
             "error: specify either --pack NAME, or both --chemistry and --cells",
@@ -277,67 +260,62 @@ def _resolve_pack_and_current(args: argparse.Namespace) -> tuple[Pack | None, in
             file=sys.stderr,
         )
         sys.exit(1)
-    return None, args.current_ma
-
-
-def _check_pack_cell_count_matches_device(dev: Device, pack: Pack) -> None:
-    """Refuse to proceed if the charger's live cell count doesn't match `pack`.
-
-    This is the core safety check `start --pack` exists for. It's a
-    live hardware read even in --dry-run mode (reads are always safe) -
-    --dry-run should tell you truthfully whether the real send would
-    have been blocked, not skip the check. Exits with a clear
-    explanation on mismatch; does nothing (returns) if the counts agree.
-
-    Reads GET_SYS_INFO, not GET_CHARGE_INFO - confirmed 2026-08-02 (see
-    DRY_RUN.md) that GET_CHARGE_INFO's cells_mv is always empty while
-    the charger is IDLE on this hardware, which is exactly the state
-    it's always in the moment before a charge starts. Checking it here
-    would make this safety gate permanently unable to pass. GET_SYS_INFO
-    stays genuinely live while idle - verified against a real pack.
-    """
-    info = dev.get_sys_info()
-    try:
-        packs.check_cell_count(pack, len(info.cells_mv))
-    except packs.PackCellMismatch as e:
-        print(
-            f"error: {e} - refusing to start. Check the physical connection "
-            "and the pack you meant to select before retrying. (No flag "
-            "skips this check on purpose - use the manual --chemistry/"
-            "--cells/--current-ma flags directly if you're certain and need "
-            "to override.)",
-            file=sys.stderr,
-        )
-        sys.exit(1)
 
 
 def _cmd_start(args: argparse.Namespace) -> None:
     """Handle `b6ctl start`.
 
-    Builds a ChargeProfile (from --pack or manual flags), runs the
-    pack/cell-count cross-check when using --pack, then hands off to
-    _confirm_and_send_start.
+    Builds a ChargeProfile (from --pack or manual flags) then hands off
+    to _confirm_and_send_start. The --pack path delegates to
+    charge_request.build_pack_profile - the same function httpd.py's
+    POST /start uses - so this interface and the HTTP one can't drift
+    apart the way they have before (see charge_request.py's module
+    docstring).
     """
-    pack, current_ma = _resolve_pack_and_current(args)
+    _validate_start_args(args)
     dev = Device(_make_transport(args), dry_run=args.dry_run)
 
-    if pack is not None:
-        _check_pack_cell_count_matches_device(dev, pack)
-        cells = pack.cells
-        hv = pack.is_hv
+    if args.pack:
+        try:
+            registry = packs.load_registry()
+            profile = charge_request.build_pack_profile(
+                dev,
+                registry,
+                args.pack,
+                current_ma=args.current_ma,
+                mode=args.mode,
+                discharge_current_ma=args.discharge_current_ma,
+            )
+        except packs.PackCellMismatch as e:
+            print(
+                f"error: {e} - refusing to start. Check the physical connection "
+                "and the pack you meant to select before retrying. (No flag "
+                "skips this check on purpose - use the manual --chemistry/"
+                "--cells/--current-ma flags directly if you're certain and need "
+                "to override.)",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        except (PackConfigError, charge_request.InvalidStartRequest) as e:
+            print(f"error: {e}", file=sys.stderr)
+            sys.exit(1)
+        pack_name = args.pack
     else:
-        cells = args.cells
-        hv = args.chemistry == "lihv"
+        mode = protocol.ChargingModeLi[args.mode.upper()]
+        try:
+            profile = protocol.lipo_profile(
+                cell_count=args.cells,
+                charge_current_ma=args.current_ma,
+                mode=mode,
+                hv=(args.chemistry == "lihv"),
+                discharge_current_ma=args.discharge_current_ma,
+            )
+        except protocol.ProtocolError as e:
+            print(f"error: {e}", file=sys.stderr)
+            sys.exit(1)
+        pack_name = None
 
-    mode = protocol.ChargingModeLi[args.mode.upper()]
-    profile = protocol.lipo_profile(
-        cell_count=cells,
-        charge_current_ma=current_ma,
-        mode=mode,
-        hv=hv,
-        discharge_current_ma=args.discharge_current_ma,
-    )
-    _confirm_and_send_start(dev, profile, args, pack_name=pack.name if pack else None)
+    _confirm_and_send_start(dev, profile, args, pack_name=pack_name)
 
 
 def _cmd_stop(args: argparse.Namespace) -> None:
