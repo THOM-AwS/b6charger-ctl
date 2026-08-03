@@ -357,14 +357,25 @@ logged with the caller's address first.
 `curl`) at `http://<host>:9111/metrics`.
 
 It also reports `charger_sysinfo_pack_millivolts`/
-`charger_sysinfo_cell_millivolts{cell="N"}`/`charger_sysinfo_cell_count`,
-sourced from `GET_SYS_INFO` rather than `GET_CHARGE_INFO` - these stay
-live while the charger is idle (confirmed 2026-08-02 with a real pack
-connected), unlike the `GET_CHARGE_INFO`-derived
-`charger_pack_millivolts`/`charger_cell_millivolts`, which read zero
-until a charge actually starts. Use the `sysinfo` metrics for "is a
-battery connected and what's its voltage right now"; use the plain
-ones for in-session charge telemetry once charging begins.
+`charger_sysinfo_cell_millivolts{cell="N"}`/`charger_sysinfo_cell_count`/
+`charger_sysinfo_cell_spread_millivolts`, sourced from `GET_SYS_INFO`
+rather than `GET_CHARGE_INFO` - these stay live while the charger is
+idle (confirmed 2026-08-02 with a real pack connected), unlike the
+`GET_CHARGE_INFO`-derived `charger_pack_millivolts`/
+`charger_cell_millivolts`, which read zero until a charge actually
+starts. Use the `sysinfo` metrics for "is a battery connected and
+what's its voltage right now"; use the plain ones for in-session
+charge telemetry once charging begins.
+
+`GET_SYS_INFO`'s *configured* safety cutoffs (the same values
+`set-limits` writes and `sysinfo` prints) are exposed too:
+`charger_sysinfo_temp_limit_celsius`,
+`charger_sysinfo_low_dc_limit_millivolts`,
+`charger_sysinfo_time_limit_minutes` +
+`charger_sysinfo_time_limit_enabled`, and
+`charger_sysinfo_capacity_limit_mah` +
+`charger_sysinfo_capacity_limit_enabled` - these are settings, not
+live telemetry, so they only change when you run `set-limits`.
 
 `POST /start` with `{"pack": "name", ...}` is the HTTP equivalent of
 `b6ctl start --pack` - it runs the exact same live cell-count

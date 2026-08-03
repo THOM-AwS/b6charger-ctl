@@ -217,6 +217,33 @@ def _sysinfo_lines(device: Device) -> list[str]:
         lines.append("# TYPE charger_sysinfo_cell_spread_millivolts gauge")
         spread = max(info.cells_mv) - min(info.cells_mv)
         lines.append(f"charger_sysinfo_cell_spread_millivolts {spread}")
+
+    lines += [
+        "# HELP charger_sysinfo_temp_limit_celsius Configured internal "
+        "temperature cutoff - see 'set-limits --temp-limit'.",
+        "# TYPE charger_sysinfo_temp_limit_celsius gauge",
+        f"charger_sysinfo_temp_limit_celsius {info.temp_limit_c}",
+        "# HELP charger_sysinfo_low_dc_limit_millivolts Configured low-input-"
+        "voltage cutoff.",
+        "# TYPE charger_sysinfo_low_dc_limit_millivolts gauge",
+        f"charger_sysinfo_low_dc_limit_millivolts {info.low_dc_limit_mv}",
+        "# HELP charger_sysinfo_time_limit_minutes Configured charge time-"
+        "limit cutoff - see 'set-limits --time-limit'.",
+        "# TYPE charger_sysinfo_time_limit_minutes gauge",
+        f"charger_sysinfo_time_limit_minutes {info.time_limit_minutes}",
+        "# HELP charger_sysinfo_time_limit_enabled Whether the time-limit "
+        "cutoff above is currently enforced.",
+        "# TYPE charger_sysinfo_time_limit_enabled gauge",
+        f"charger_sysinfo_time_limit_enabled {int(info.time_limit_on)}",
+        "# HELP charger_sysinfo_capacity_limit_mah Configured charge "
+        "capacity-limit cutoff - see 'set-limits --capacity-limit'.",
+        "# TYPE charger_sysinfo_capacity_limit_mah gauge",
+        f"charger_sysinfo_capacity_limit_mah {info.capacity_limit_mah}",
+        "# HELP charger_sysinfo_capacity_limit_enabled Whether the capacity-"
+        "limit cutoff above is currently enforced.",
+        "# TYPE charger_sysinfo_capacity_limit_enabled gauge",
+        f"charger_sysinfo_capacity_limit_enabled {int(info.capacity_limit_on)}",
+    ]
     return lines
 
 

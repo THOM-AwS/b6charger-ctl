@@ -178,6 +178,29 @@ def test_render_metrics_includes_sysinfo_pack_voltage_and_cells(tmp_path, monkey
     assert "charger_sysinfo_cell_spread_millivolts 7" in body  # 3805-3798
 
 
+def test_render_metrics_includes_configured_limits(tmp_path, monkeypatch):
+    monkeypatch.setattr("b6charger.last_start.DEFAULT_PATH", str(tmp_path / "last_start.json"))
+    device = Device(FakeChargerTransport())
+    body = render_metrics(device)
+    assert "charger_sysinfo_temp_limit_celsius 50" in body
+    assert "charger_sysinfo_low_dc_limit_millivolts 11000" in body
+    assert "charger_sysinfo_time_limit_minutes 200" in body
+    assert "charger_sysinfo_time_limit_enabled 0" in body
+    assert "charger_sysinfo_capacity_limit_mah 5000" in body
+    assert "charger_sysinfo_capacity_limit_enabled 0" in body
+
+
+def test_render_metrics_reflects_enabled_limits(tmp_path, monkeypatch):
+    monkeypatch.setattr("b6charger.last_start.DEFAULT_PATH", str(tmp_path / "last_start.json"))
+    fake = FakeChargerTransport()
+    fake.time_limit_on = True
+    fake.capacity_limit_on = True
+    device = Device(fake)
+    body = render_metrics(device)
+    assert "charger_sysinfo_time_limit_enabled 1" in body
+    assert "charger_sysinfo_capacity_limit_enabled 1" in body
+
+
 def test_render_metrics_includes_sysinfo_even_when_charger_up_0(tmp_path, monkeypatch):
     monkeypatch.setattr("b6charger.last_start.DEFAULT_PATH", str(tmp_path / "last_start.json"))
 
