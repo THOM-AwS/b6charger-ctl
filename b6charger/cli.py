@@ -54,7 +54,22 @@ def _make_transport(args: argparse.Namespace):
     given). Exits with a friendly one-line message (not a traceback) if
     no real charger can be found, since this is the first thing every
     real-hardware command hits.
+
+    --fake with --device ALSO given is almost certainly not what was
+    meant - most likely "I want to test against my real device" typed
+    with a leftover --fake from an earlier dry run, or vice versa. Both
+    values are known and disagree, so guessing which one to honor
+    silently (as this used to do, always preferring --fake) is worse
+    than a one-line error asking for one or the other explicitly.
     """
+    if args.fake and args.device:
+        print(
+            "error: --fake and --device are mutually exclusive - --fake uses an "
+            "in-memory simulated charger and ignores --device entirely, so passing "
+            "both together is almost certainly not what you meant",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     if args.fake:
         return FakeChargerTransport()
     try:

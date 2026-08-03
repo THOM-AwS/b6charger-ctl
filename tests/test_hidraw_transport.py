@@ -85,3 +85,35 @@ def test_transact_recovers_from_a_stale_unwritable_lock_file(tmp_path, monkeypat
     )
     # doesn't raise - recovers by unlinking and recreating the lock file.
     transport.transact(b"\x0f\x03\x55\x00\x55\xff\xff")
+
+
+def test_transact_raises_a_clear_error_when_lock_recovery_also_fails(tmp_path, monkeypatch):
+    # If the unlink-and-recreate recovery above ITSELF fails (e.g. a
+    # concurrent process, or a permission problem on the directory),
+    # this must raise a clear, actionable OSError - not silently
+    # continue without a working lock (this file's whole purpose is
+    # serializing concurrent hardware access, unlike last_start.py's
+    # best-effort file) and not a raw, contextless errno from whichever
+    # of unlink/reopen happened to fail.
+    device_path = tmp_path / "hidraw_fake"
+    device_path.touch()
+    monkeypatch.setattr(
+        "b6charger.transport.select.select", lambda rlist, w, x, timeout: (rlist, [], [])
+    )
+
+    lock_path = tmp_path / "lock"
+    lock_path.touch()
+    lock_path.chmod(0o000)  # forces the first open() to fail, triggering recovery
+
+    def raise_on_unlink(_path):
+        raise OSError("simulated: can't remove the lock file either")
+
+    monkeypatch.setattr("b6charger.transport.os.unlink", raise_on_unlink)
+
+    transport = HidRawTransport(
+        device_path=str(device_path),
+        timeout_s=1.0,
+        lock_path=str(lock_path),
+    )
+    with pytest.raises(OSError, match="could not recover a stale"):
+        transport.transact(b"\x0f\x03\x55\x00\x55\xff\xff")

@@ -134,13 +134,32 @@ class HidRawTransport:
         PermissionError). Since this file holds no meaningful state - it's
         purely an empty advisory lock - a permission error on open is safe
         to resolve by removing and recreating it, once.
+
+        Unlike last_start.py's equivalent recovery, a failure here isn't
+        swallowed: that file's whole purpose is serializing concurrent
+        hardware access (see the module docstring's stuck-`stop` story),
+        so silently proceeding without a working lock would reintroduce
+        the exact bug this exists to prevent. If the retry itself fails
+        (e.g. the unlink races a concurrent process, or a permission
+        problem on the directory itself), this raises a clear OSError
+        with both attempts' context instead of whatever raw errno
+        message the failed unlink/reopen happened to produce - still an
+        OSError, so it's caught the same way by every existing caller
+        (main()'s top-level handler, httpd.py's request handlers).
         """
         flags = os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW
         try:
             return os.open(self._lock_path, flags, 0o666)
         except PermissionError:
+            pass
+        try:
             os.unlink(self._lock_path)
             return os.open(self._lock_path, flags, 0o666)
+        except OSError as e:
+            raise OSError(
+                f"could not recover a stale, unwritable lock file at "
+                f"{self._lock_path} (tried removing and recreating it): {e}"
+            ) from e
 
     def transact(self, frame: bytes, n: int = 64) -> bytes:
         """Send `frame` and return the response, serialized against other b6ctl calls.

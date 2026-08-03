@@ -6,6 +6,22 @@ from b6charger import cli
 from b6charger.transport import FakeChargerTransport
 
 
+def test_fake_and_device_together_is_rejected(capsys):
+    # Previously --fake silently won with no warning - a leftover
+    # --fake from an earlier dry run, or a leftover --device from a
+    # real-hardware test, would silently do the wrong thing.
+    parser = cli.build_parser()
+    args = parser.parse_args(["--fake", "--device", "/dev/hidraw0", "status"])
+    try:
+        args.func(args)
+        raised = False
+    except SystemExit as e:
+        raised = True
+        assert e.code == 1
+    assert raised
+    assert "mutually exclusive" in capsys.readouterr().err
+
+
 def test_status_json_against_fake(capsys):
     parser = cli.build_parser()
     args = parser.parse_args(["--fake", "status", "--json"])
