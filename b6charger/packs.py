@@ -24,6 +24,8 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
+from b6charger.protocol import MAX_DEVICE_CURRENT_MA
+
 DEFAULT_CONFIG_PATH = Path("packs.toml")
 EXAMPLE_CONFIG_PATH = Path("packs.example.toml")
 
@@ -151,15 +153,16 @@ def _validate_pack(name: str, raw: dict) -> Pack:
             f"pack '{name}': capacity_mah must be positive, got {capacity_mah}"
         )
 
-    max_allowed_ma = int(capacity_mah * MAX_SAFE_C_RATE)
+    max_allowed_ma = min(int(capacity_mah * MAX_SAFE_C_RATE), MAX_DEVICE_CURRENT_MA)
     max_current_ma = int(raw.get("max_current_ma", max_allowed_ma))
     if max_current_ma > max_allowed_ma:
         raise PackConfigError(
             f"pack '{name}': max_current_ma={max_current_ma} exceeds "
             f"{MAX_SAFE_C_RATE:.0f}C for a {capacity_mah}mAh pack "
-            f"({max_allowed_ma}mA) - this tool will not raise this ceiling "
-            "even via the config file, since it's a chemistry limit, not a "
-            "preference"
+            f"({max_allowed_ma}mA, also capped at this hardware family's "
+            f"{MAX_DEVICE_CURRENT_MA}mA rated output) - this tool will not "
+            "raise this ceiling even via the config file, since it's a "
+            "chemistry/hardware limit, not a preference"
         )
 
     default_current_ma = int(raw["default_current_ma"])

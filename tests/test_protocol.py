@@ -132,6 +132,33 @@ def test_charge_profile_rejects_bad_cell_count():
         )
 
 
+def test_charge_profile_rejects_current_above_device_ceiling():
+    """A manual/raw profile has no pack to derive a C-rate from - the
+    device ceiling is the only thing standing between a typo/bad input
+    and an unbounded current, so it must apply unconditionally."""
+    with pytest.raises(protocol.ProtocolError):
+        protocol.ChargeProfile(
+            battery_type=protocol.BatteryType.LIPO,
+            cell_count=3,
+            mode_li=protocol.ChargingModeLi.BALANCE,
+            charge_current_ma=protocol.MAX_DEVICE_CURRENT_MA + 1,
+        )
+    with pytest.raises(protocol.ProtocolError):
+        protocol.ChargeProfile(
+            battery_type=protocol.BatteryType.LIPO,
+            cell_count=3,
+            mode_li=protocol.ChargingModeLi.BALANCE,
+            discharge_current_ma=protocol.MAX_DEVICE_CURRENT_MA + 1,
+        )
+    # exactly at the ceiling is still allowed
+    protocol.ChargeProfile(
+        battery_type=protocol.BatteryType.LIPO,
+        cell_count=3,
+        mode_li=protocol.ChargingModeLi.BALANCE,
+        charge_current_ma=protocol.MAX_DEVICE_CURRENT_MA,
+    )
+
+
 def test_parse_charge_info_round_trips_through_fake_transport_encoding():
     from b6charger.transport import FakeChargerTransport
 

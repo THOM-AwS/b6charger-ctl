@@ -64,6 +64,17 @@ class SetSystemParam(IntEnum):
 
 START_CHARGING_CMD = 0x05
 
+#: Hard device-capability ceiling for charge/discharge current, enforced
+#: unconditionally in ChargeProfile.__post_init__ regardless of how the
+#: profile was built. This hardware family (iMAX B6/B6AC/B6 mini and
+#: rebadged clones) is commonly rated up to 5A/50W; 6A leaves headroom
+#: for the handful of higher-rated variants without this project having
+#: separately verified each one's exact spec sheet. This is deliberately
+#: NOT a substitute for packs.py's tighter, chemistry-derived 1C ceiling
+#: (MAX_SAFE_C_RATE) - it exists to catch a manual/raw-body current that
+#: has no pack to derive a C-rate from at all, not to replace that check.
+MAX_DEVICE_CURRENT_MA = 6000
+
 
 class ChargingModeLi(IntEnum):
     """Charging mode for lithium chemistries (LiPo/LiIon/LiFe/LiHV)."""
@@ -301,7 +312,19 @@ class ChargeProfile:
     cycle_count: int = 1
 
     def __post_init__(self) -> None:
-        """Validate cell count and that the mode matching this chemistry was set."""
+        """Validate cell count, mode, and current against the hardware's own ceiling.
+
+        The current checks are a backstop, not a substitute for
+        packs.py's tighter, chemistry-derived 1C ceiling: packs.toml's
+        MAX_SAFE_C_RATE only applies to profiles built via `--pack`
+        (see packs.check_cell_count/_validate_pack). A profile built
+        from manual CLI flags or a raw HTTP body has no pack to derive
+        a C-rate from, so without a check here the only bound left is
+        `_u16`'s wire-format range (0-65535mA) - not a safety limit,
+        just what fits in the frame. This rejects anything above what
+        the charger hardware itself is rated for, regardless of how
+        the profile was built.
+        """
         if not 1 <= self.cell_count <= 16:
             raise ProtocolError("cell_count must be 1-16")
         if self.battery_type.is_lithium and self.mode_li is None:
@@ -310,6 +333,18 @@ class ChargeProfile:
             raise ProtocolError("NiMH/NiCd require mode_ni")
         if self.battery_type == BatteryType.PB and self.mode_pb is None:
             raise ProtocolError("Pb requires mode_pb")
+        if not 0 <= self.charge_current_ma <= MAX_DEVICE_CURRENT_MA:
+            raise ProtocolError(
+                f"charge_current_ma {self.charge_current_ma} exceeds this hardware "
+                f"family's rated output ({MAX_DEVICE_CURRENT_MA}mA) - if you're using "
+                "--pack, its max_current_ma should already be well under this; if not, "
+                "this is the hard device ceiling, not a chemistry-safe one"
+            )
+        if not 0 <= self.discharge_current_ma <= MAX_DEVICE_CURRENT_MA:
+            raise ProtocolError(
+                f"discharge_current_ma {self.discharge_current_ma} exceeds this "
+                f"hardware family's rated output ({MAX_DEVICE_CURRENT_MA}mA)"
+            )
 
 
 # Defaults per libb6's Device::getDefaultChargeProfile - useful starting
@@ -376,6 +411,17 @@ def build_start_charging(profile: ChargeProfile) -> bytes:
         if profile.mode_pb is None:
             raise ProtocolError("Pb requires mode_pb")
         payload.append(profile.mode_pb)
+
+    if not 0 <= profile.charge_current_ma <= MAX_DEVICE_CURRENT_MA:
+        raise ProtocolError(
+            f"charge_current_ma {profile.charge_current_ma} exceeds this hardware "
+            f"family's rated output ({MAX_DEVICE_CURRENT_MA}mA)"
+        )
+    if not 0 <= profile.discharge_current_ma <= MAX_DEVICE_CURRENT_MA:
+        raise ProtocolError(
+            f"discharge_current_ma {profile.discharge_current_ma} exceeds this "
+            f"hardware family's rated output ({MAX_DEVICE_CURRENT_MA}mA)"
+        )
 
     payload += _u16(profile.charge_current_ma)
     payload += _u16(profile.discharge_current_ma)
