@@ -547,29 +547,42 @@ def _plausible_temp(raw_c: int) -> int | None:
     return raw_c if TEMP_MIN_C <= raw_c <= TEMP_MAX_C else None
 
 
-#: States that get the conservative "short frame" decode - state/temp
-#: only, everything pack-derived zeroed/empty. Named for what they
-#: share (no trusted pack telemetry), not for what they mean - only
-#: ERROR is a genuine fault; IDLE just hasn't been verified safe to
-#: decode fully yet. See ChargeInfo's docstring.
-_SHORT_FRAME_STATES = (State.IDLE, State.ERROR)
+#: The only two states with a CONFIRMED, verified-against-real-hardware
+#: full pack-telemetry layout - everything else (IDLE, ERROR, and any
+#: state byte this project has never seen, e.g. noise from a stuck read
+#: buffer, see DRY_RUN.md) gets the conservative "short frame" decode:
+#: state/temp only, everything pack-derived zeroed/empty. Deliberately
+#: an allowlist, not a denylist of the states known to need the
+#: conservative treatment - an unrecognized state byte defaulting to
+#: the FULL decode would report pack telemetry as trustworthy for a
+#: state this project has no verified layout for at all, which is
+#: exactly the failure mode this whole zero-when-unverified approach
+#: exists to prevent everywhere else in this function.
+_FULL_FRAME_STATES = (State.CHARGING, State.COMPLETE)
 
 
 def parse_charge_info(resp: bytes) -> ChargeInfo:
     """Parse a GET_CHARGE_INFO response frame into a ChargeInfo.
 
-    When the state byte is IDLE or ERROR, `capacity`/`time`/`voltage`/
+    Only CHARGING and COMPLETE get the full pack-telemetry decode -
+    every other state, including IDLE, ERROR, and any state byte this
+    project has never seen (see `_FULL_FRAME_STATES`), gets the
+    conservative "short frame" treatment: `capacity`/`time`/`voltage`/
     `current`/`impedance`/`cells_mv` are zeroed/empty rather than
-    decoded - libb6's Device.cc confirms the wire format inserts a
-    2-byte error code immediately after the state byte during ERROR,
-    but it never reads anything past that (it throws immediately), so
-    there is no verified layout for those pack-derived fields there;
-    IDLE gets the same conservative treatment for a different reason
-    (see ChargeInfo's docstring) rather than guessing at a shifted
-    continuation of the normal layout, which is exactly what produced
-    a real stale-data bug in production before (see DRY_RUN.md).
-    `error_code` is only decoded for ERROR - IDLE isn't an error, so
-    u16(5) there isn't one either.
+    decoded. For ERROR specifically: libb6's Device.cc confirms the
+    wire format inserts a 2-byte error code immediately after the
+    state byte, but it never reads anything past that (it throws
+    immediately), so there is no verified layout for those pack-
+    derived fields there. IDLE gets the same conservative treatment
+    for a different reason (see ChargeInfo's docstring) rather than
+    guessing at a shifted continuation of the normal layout, which is
+    exactly what produced a real stale-data bug in production before
+    (see DRY_RUN.md). An unrecognized state byte gets it for the same
+    reason as both: no verified layout to trust, full stop - this is
+    deliberately an allowlist of the states known safe to fully
+    decode, not a denylist of the states known to need caution.
+    `error_code` is only decoded for ERROR - IDLE and unrecognized
+    states aren't errors, so u16(5) there isn't one either.
 
     `temp_ext_c`/`temp_int_c` are ONLY decoded (non-None) when
     `state == CHARGING` - confirmed 2026-08-03 (see ChargeInfo's
@@ -602,7 +615,7 @@ def parse_charge_info(resp: bytes) -> ChargeInfo:
         temp_ext_c = None
         temp_int_c = None
 
-    if state in (s.value for s in _SHORT_FRAME_STATES):
+    if state not in (s.value for s in _FULL_FRAME_STATES):
         return ChargeInfo(
             state=state,
             capacity_mah=0,

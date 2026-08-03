@@ -229,6 +229,34 @@ def test_parse_charge_info_zeroes_pack_telemetry_and_temp_in_idle_state():
     assert info.temp_int_c is None
 
 
+def test_parse_charge_info_zeroes_pack_telemetry_for_unrecognized_state_byte():
+    # An unrecognized/garbage state byte - e.g. noise from a stuck read
+    # buffer, a proven failure mode on this hardware (see DRY_RUN.md) -
+    # must NOT fall through to the full pack-telemetry decode just
+    # because it isn't specifically IDLE or ERROR. There's no verified
+    # layout for any state this project hasn't confirmed, unrecognized
+    # ones very much included - trusting one by default would be the
+    # exact failure mode this whole zero-when-unverified approach
+    # exists to prevent everywhere else in this function.
+    from b6charger.transport import FakeChargerTransport
+
+    fake = FakeChargerTransport()
+    fake.cells_mv = (4197, 4201, 4192)
+    fake.pack_voltage_mv = 12605
+    fake.current_ma = 292
+    encoded = bytearray(fake._encode_charge_info())
+    encoded[4] = 99  # not a real State value
+
+    info = protocol.parse_charge_info(bytes(encoded))
+    assert info.state == 99
+    assert info.state_name == "UNKNOWN(99)"
+    assert info.cells_mv == ()
+    assert info.voltage_mv == 0
+    assert info.current_ma == 0
+    assert info.capacity_mah == 0
+    assert info.error_code is None
+
+
 def test_parse_charge_info_only_trusts_temp_while_charging():
     # Confirmed 2026-08-03: capacity/voltage/cells legitimately freeze
     # at their final value once a charge completes - that's correct,
