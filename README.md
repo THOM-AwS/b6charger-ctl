@@ -326,9 +326,24 @@ Two independent safety levers rather than one:
   day with zero ability for anyone to command the charger, unless you
   deliberately started it with `--enable-writes`.
 
+`--enable-writes` widens *who* can act, not just what's possible: with
+the default `0.0.0.0` bind, it turns "anyone who can reach this port"
+into "anyone who can command the charger" - a bigger population than
+this project otherwise assumes (one operator, one device). Set the
+`B6CTL_WRITE_TOKEN` environment variable to close that gap: once set,
+`POST /start` and `POST /stop` additionally require
+`Authorization: Bearer <token>`, checked with a constant-time
+comparison. It's an env var rather than a flag deliberately - a flag's
+value is visible to any other local user via `ps`. **Strongly
+recommended** whenever `--enable-writes` is used outside a fully
+trusted LAN; without it, `_cmd_serve` logs a loud warning at startup
+rather than silently proceeding unauthenticated.
+
 ```bash
 b6ctl serve                                          # metrics/status only - writes always 403
-b6ctl serve --enable-writes                          # also allow /start and /stop
+b6ctl serve --enable-writes                          # also allow /start and /stop - no auth
+B6CTL_WRITE_TOKEN=$(openssl rand -hex 32) \
+  b6ctl serve --enable-writes                        # also allow /start and /stop - token required
 b6ctl serve --listen 0.0.0.0:9111 --enable-writes    # combined interface:port form
 b6ctl serve --listen [::1]:9111                      # IPv6 needs bracket notation
 ```
@@ -348,6 +363,10 @@ its own copies.
 | `--dry-run` | (boolean) | off | With `--enable-writes`, log writes but send nothing to the device |
 | `--cache-seconds` | float, seconds | `5.0` | How long a rendered `/metrics` body is reused before polling the device again |
 
+`B6CTL_WRITE_TOKEN` (environment variable, not a flag - see above) -
+when set alongside `--enable-writes`, requires a matching
+`Authorization: Bearer <token>` header on `POST /start`/`POST /stop`.
+
 ### Endpoints
 
 ```
@@ -359,8 +378,10 @@ POST /stop
 ```
 
 `POST /start` and `POST /stop` return `403` unless the daemon was
-started with `--enable-writes`. Every write that does go through is
-logged with the caller's address first.
+started with `--enable-writes`, and `401` if `B6CTL_WRITE_TOKEN` is
+set and the request's `Authorization: Bearer <token>` header is
+missing or wrong. Every write that does go through is logged with the
+caller's address first.
 
 `/metrics` reports the same metric names this project has always used
 (`charger_state`, `charger_cell_millivolts{cell="N"}`,

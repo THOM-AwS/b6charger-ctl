@@ -18,6 +18,21 @@ Two independent safety levers, not one:
    day with zero ability for anyone to command the charger, unless you
    deliberately started it with `--enable-writes`.
 
+`--enable-writes` widens who can act, not just what's possible - the
+default bind is 0.0.0.0 (see DEFAULT_HOST below), so enabling it turns
+"anyone who can reach this port" into "anyone who can command the
+charger," which for a LAN daemon is a materially bigger population
+than the single local operator this project otherwise assumes (see
+transport.py's /tmp-path threat-model reasoning, which doesn't carry
+over to a network listener). `B6CTL_WRITE_TOKEN` (an environment
+variable, deliberately not a CLI flag - a flag value is visible to any
+other local user via `ps`) closes that gap: when set, POST /start and
+/stop additionally require `Authorization: Bearer <token>`, checked
+with a constant-time comparison. Unset by default for backwards
+compatibility with an existing --enable-writes deployment that hasn't
+configured one yet - `_cmd_serve` logs a loud warning in that case
+rather than silently proceeding unauthenticated.
+
 `--dry-run` is a third, independent layer on top of `--enable-writes`:
 with both set, the write endpoints are reachable and behave normally
 except nothing is actually sent to the device - useful for exercising
@@ -46,6 +61,7 @@ cross-check as `b6ctl start --pack` (packs.check_cell_count), returning
 from __future__ import annotations
 
 import argparse
+import hmac
 import json
 import logging
 import threading
@@ -64,6 +80,13 @@ log = logging.getLogger("b6charger.httpd")
 DEFAULT_HOST = "0.0.0.0"  # nosec B104
 DEFAULT_PORT = 9111
 DEFAULT_CACHE_S = 5.0
+
+#: Environment variable holding the bearer token POST /start and /stop
+#: require once --enable-writes is set (see module docstring). Read by
+#: cli.py's _cmd_serve at startup, not by this module directly - kept
+#: as a plain env var rather than a CLI flag so the token itself never
+#: appears in `ps`/shell history/systemd unit files.
+WRITE_TOKEN_ENV_VAR = "B6CTL_WRITE_TOKEN"  # nosec B105 - an env var NAME, not a secret value
 
 STATE_HELP = {s.value: s.name for s in protocol.State}
 
@@ -337,13 +360,21 @@ def render_metrics(device: Device) -> str:
 
 
 def make_handler(
-    device: Device, metrics_cache: MetricsCache, enable_writes: bool
+    device: Device,
+    metrics_cache: MetricsCache,
+    enable_writes: bool,
+    write_token: str | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     """Build a BaseHTTPRequestHandler subclass bound to a specific `device`.
 
     A class (not an instance) is what ThreadingHTTPServer expects; this
     closure is the standard way to give every request handler access to
     the same shared Device/cache/policy without using globals.
+
+    `write_token`, if set, is required as `Authorization: Bearer
+    <token>` on POST /start and /stop, in addition to `enable_writes`
+    being True - see WRITE_TOKEN_ENV_VAR and the module docstring.
+    None (the default) preserves the old enable_writes-only behavior.
     """
 
     class Handler(BaseHTTPRequestHandler):
@@ -357,6 +388,18 @@ def make_handler(
             self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
             self.wfile.write(payload)
+
+        def _has_valid_write_token(self) -> bool:
+            """Check the request's Authorization header against `write_token`.
+
+            Only called when `write_token` is not None. Uses a
+            constant-time comparison (hmac.compare_digest) - a naive
+            `==` would leak how many leading characters matched via
+            response timing, the standard token-comparison pitfall.
+            """
+            auth = self.headers.get("Authorization", "")
+            provided = auth[len("Bearer ") :] if auth.startswith("Bearer ") else ""
+            return hmac.compare_digest(provided, write_token)
 
         def _metrics(self) -> None:
             """Serve the cached Prometheus metrics body."""
@@ -416,6 +459,21 @@ def make_handler(
                     {
                         "error": "write endpoints disabled - restart this daemon "
                         "with --enable-writes to allow start/stop"
+                    },
+                )
+                return
+
+            if write_token is not None and not self._has_valid_write_token():
+                log.warning(
+                    "rejected POST %s from %s - missing or invalid write token",
+                    self.path,
+                    self.client_address[0],
+                )
+                self._json(
+                    401,
+                    {
+                        "error": "missing or invalid write token - set the "
+                        "Authorization: Bearer <token> header"
                     },
                 )
                 return

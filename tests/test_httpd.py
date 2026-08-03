@@ -292,11 +292,13 @@ def running_server():
 
     servers = []
 
-    def start(enable_writes: bool, device: Device | None = None):
+    def start(
+        enable_writes: bool, device: Device | None = None, write_token: str | None = None
+    ):
         device = device or Device(FakeChargerTransport())
         cache = MetricsCache(lambda: render_metrics(device), cache_s=0.0)
         server = ThreadingHTTPServer(
-            ("127.0.0.1", 0), make_handler(device, cache, enable_writes)
+            ("127.0.0.1", 0), make_handler(device, cache, enable_writes, write_token)
         )
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -605,3 +607,63 @@ def test_post_start_with_pack_returns_502_when_get_sys_info_fails(
     with pytest.raises(urllib.error.HTTPError) as exc_info:
         urllib.request.urlopen(req)
     assert exc_info.value.code == 502
+
+
+# --- B6CTL_WRITE_TOKEN: optional bearer-token auth on write endpoints ---
+
+
+def test_write_endpoints_reject_missing_token_when_configured(running_server):
+    base_url = running_server(enable_writes=True, write_token="s3cret")
+    req = urllib.request.Request(f"{base_url}/stop", data=b"{}", method="POST")
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        urllib.request.urlopen(req)
+    assert exc_info.value.code == 401
+
+
+def test_write_endpoints_reject_wrong_token_when_configured(running_server):
+    base_url = running_server(enable_writes=True, write_token="s3cret")
+    req = urllib.request.Request(
+        f"{base_url}/stop",
+        data=b"{}",
+        method="POST",
+        headers={"Authorization": "Bearer wrong"},
+    )
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        urllib.request.urlopen(req)
+    assert exc_info.value.code == 401
+
+
+def test_write_endpoints_accept_correct_token_when_configured(running_server):
+    base_url = running_server(enable_writes=True, write_token="s3cret")
+    req = urllib.request.Request(
+        f"{base_url}/stop",
+        data=b"{}",
+        method="POST",
+        headers={"Authorization": "Bearer s3cret"},
+    )
+    with urllib.request.urlopen(req) as resp:
+        assert resp.status == 200
+
+
+def test_write_endpoints_ignore_token_header_when_no_token_configured(running_server):
+    # No write_token set at all - old enable_writes-only behavior must
+    # still work, token header or not.
+    base_url = running_server(enable_writes=True, write_token=None)
+    req = urllib.request.Request(f"{base_url}/stop", data=b"{}", method="POST")
+    with urllib.request.urlopen(req) as resp:
+        assert resp.status == 200
+
+
+def test_write_endpoints_check_enable_writes_before_token(running_server):
+    # The --enable-writes gate is primary - checked before the token,
+    # so a disabled daemon still 403s regardless of any token supplied.
+    base_url = running_server(enable_writes=False, write_token="s3cret")
+    req = urllib.request.Request(
+        f"{base_url}/stop",
+        data=b"{}",
+        method="POST",
+        headers={"Authorization": "Bearer s3cret"},
+    )
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        urllib.request.urlopen(req)
+    assert exc_info.value.code == 403
