@@ -21,7 +21,14 @@ b6ctl = "b6charger.cli:main"
 # which can silently diverge from what pre-commit enforces locally:
 # "passes pre-commit, fails CI lint" (or vice versa) with no config
 # change on either side. Bump both together when upgrading.
-dev = ["pytest>=7", "pytest-cov==7.1.0", "ruff==0.16.1", "black==26.5.1", "bandit==1.9.4"]
+dev = [
+    "pytest>=7",
+    "pytest-cov==7.1.0",
+    "ruff==0.16.1",
+    "black==26.5.1",
+    "bandit==1.9.4",
+    "mypy==2.3.0",
+]
 
 [tool.setuptools]
 packages = ["b6charger"]
@@ -50,3 +57,23 @@ ignore = [
 
 [tool.bandit]
 exclude_dirs = ["tests"]
+
+[tool.mypy]
+python_version = "3.11"
+# Deliberately not --strict: this codebase types every public function
+# signature (a real, checked guarantee worth enforcing in CI - hence
+# disallow_untyped_defs below) but doesn't chase every strict-mode nit
+# (e.g. requiring dict[K, V] everywhere a bare dict appears, even for
+# genuinely heterogeneous JSON-shaped bodies) where the extra
+# precision wouldn't catch a real bug. Tighten this over time as
+# specific gaps turn out to matter.
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+warn_return_any = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false

@@ -66,7 +66,9 @@ import json
 import logging
 import threading
 import time
+from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler
+from typing import Any
 
 from b6charger import charge_request, last_start, packs, protocol
 from b6charger.device import Device
@@ -152,7 +154,7 @@ class MetricsCache:
     safe either way; this just avoids the redundant hardware chatter.
     """
 
-    def __init__(self, render, cache_s: float = DEFAULT_CACHE_S) -> None:
+    def __init__(self, render: Callable[[], str], cache_s: float = DEFAULT_CACHE_S) -> None:
         """Wrap `render` (a zero-arg callable returning the metrics text)."""
         self._render = render
         self._cache_s = cache_s
@@ -402,7 +404,7 @@ def make_handler(
         #: the connection, it doesn't crash the handler.
         timeout = REQUEST_TIMEOUT_S
 
-        def _json(self, code: int, body: dict) -> None:
+        def _json(self, code: int, body: dict[str, Any]) -> None:
             """Write `body` as a JSON response with the given status code."""
             payload = json.dumps(body).encode()
             self.send_response(code)
@@ -414,11 +416,17 @@ def make_handler(
         def _has_valid_write_token(self) -> bool:
             """Check the request's Authorization header against `write_token`.
 
-            Only called when `write_token` is not None. Uses a
-            constant-time comparison (hmac.compare_digest) - a naive
-            `==` would leak how many leading characters matched via
-            response timing, the standard token-comparison pitfall.
+            Only called when `write_token` is not None - checked with a
+            real exception rather than `assert` (which `python -O`
+            strips), both to narrow the type for the type checker and
+            because a call from anywhere else would be a real bug worth
+            failing loudly on even under -O. Uses a constant-time
+            comparison (hmac.compare_digest) - a naive `==` would leak
+            how many leading characters matched via response timing,
+            the standard token-comparison pitfall.
             """
+            if write_token is None:
+                raise RuntimeError("_has_valid_write_token called with no write_token set")
             auth = self.headers.get("Authorization", "")
             provided = auth[len("Bearer ") :] if auth.startswith("Bearer ") else ""
             return hmac.compare_digest(provided, write_token)
@@ -555,8 +563,21 @@ def make_handler(
             if device.dry_run:
                 self._json(200, {"ok": True, "dry_run": True})
                 return
+            # start_charging_verified() only returns None in dry_run mode,
+            # already handled and returned above. A real exception, not
+            # `assert` (which `python -O` strips - see
+            # protocol.build_start_charging's own re-validation for why
+            # this project treats that as a real bypass class), narrows
+            # the type for every access below.
+            if result is None:
+                raise RuntimeError("start_charging_verified() returned None outside dry_run")
 
             if result.confirmed:
+                # confirmed=True is only ever set alongside a real info
+                # (see StartVerification's docstring) - same reasoning
+                # as above, one level down.
+                if result.info is None:
+                    raise RuntimeError("StartVerification.confirmed=True with info=None")
                 last_start.record(profile, pack=body.get("pack"))
                 self._json(
                     200,
@@ -585,7 +606,9 @@ def make_handler(
                     },
                 )
 
-        def _build_profile_from_raw_body(self, body: dict) -> protocol.ChargeProfile | None:
+        def _build_profile_from_raw_body(
+            self, body: dict[str, Any]
+        ) -> protocol.ChargeProfile | None:
             """Build a ChargeProfile from a raw {"chemistry","cells","current_ma",...} body.
 
             No pack-registry cross-check here - this is the manual/raw
@@ -598,7 +621,9 @@ def make_handler(
                 self._json(400, {"error": f"bad profile: {e}"})
                 return None
 
-        def _build_profile_from_pack(self, body: dict) -> protocol.ChargeProfile | None:
+        def _build_profile_from_pack(
+            self, body: dict[str, Any]
+        ) -> protocol.ChargeProfile | None:
             """Build a ChargeProfile from a {"pack": "name", ...} body.
 
             The HTTP equivalent of `b6ctl start --pack NAME`: delegates
@@ -643,7 +668,7 @@ def make_handler(
                 self._json(502, {"error": str(e)})
                 return None
 
-        def log_message(self, *args) -> None:
+        def log_message(self, format: str, *args: Any) -> None:  # stdlib signature
             """Suppress BaseHTTPRequestHandler's default stderr access log."""
 
     return Handler

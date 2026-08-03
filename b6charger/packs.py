@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import os
 import tomllib
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -144,7 +145,7 @@ class PackRegistry:
                 f"no pack named '{name}' in {self.source_path} - known packs: {known}"
             ) from None
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[Pack]:
         """Iterate over configured Pack objects (not names) in the registry."""
         return iter(self.packs.values())
 

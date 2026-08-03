@@ -20,6 +20,8 @@ validation itself.
 
 from __future__ import annotations
 
+from typing import Any, cast
+
 from b6charger import packs, protocol
 from b6charger.device import Device
 
@@ -44,9 +46,13 @@ def _as_int(value: object, field_name: str) -> int:
     be numeric: a non-numeric string (ValueError), or a type int()
     can't coerce at all, like a list/dict/None (TypeError) - a gap the
     HTTP raw-body path used to have, since it only caught ValueError.
+    `value` is deliberately `object`, not `int | str`, because JSON's
+    dynamic typing means it could genuinely be anything at runtime -
+    `cast(Any, ...)` here just tells the type checker that the
+    following try/except is the real validation, not a shortcut around it.
     """
     try:
-        return int(value)  # type: ignore[arg-type]
+        return int(cast(Any, value))
     except (TypeError, ValueError):
         raise InvalidStartRequest(f"{field_name} must be a number, got {value!r}") from None
 
@@ -69,7 +75,7 @@ def parse_mode(raw_mode: object) -> protocol.ChargingModeLi:
         ) from None
 
 
-def build_raw_profile(body: dict) -> protocol.ChargeProfile:
+def build_raw_profile(body: dict[str, Any]) -> protocol.ChargeProfile:
     """Build a ChargeProfile from a raw {"chemistry","cells","current_ma",...} body.
 
     The manual/raw path - equivalent to `b6ctl start` without `--pack`.

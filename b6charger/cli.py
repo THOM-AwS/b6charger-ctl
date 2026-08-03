@@ -32,6 +32,7 @@ import logging
 import os
 import sys
 from http.server import ThreadingHTTPServer
+from typing import cast
 
 from b6charger import charge_request, httpd, last_start, packs, protocol
 from b6charger.device import Device
@@ -41,12 +42,13 @@ from b6charger.transport import (
     FakeChargerTransport,
     HidRawTransport,
     NoChargerFound,
+    Transport,
 )
 
 log = logging.getLogger("b6charger.cli")
 
 
-def _make_transport(args: argparse.Namespace):
+def _make_transport(args: argparse.Namespace) -> Transport:
     """Build the Transport a subcommand should use.
 
     The in-memory fake if --fake was given, otherwise a real
@@ -195,7 +197,10 @@ def _cmd_packs_show(args: argparse.Namespace) -> None:
 
 
 def _confirm_and_send_start(
-    dev: Device, profile: protocol.ChargeProfile, args, pack_name: str | None = None
+    dev: Device,
+    profile: protocol.ChargeProfile,
+    args: argparse.Namespace,
+    pack_name: str | None = None,
 ) -> None:
     """Print the profile about to be sent, then send it or log it under --dry-run.
 
@@ -236,7 +241,19 @@ def _confirm_and_send_start(
             print("aborted")
             sys.exit(1)
     result = dev.start_charging_verified(profile)
+    # start_charging_verified() only returns None in dry_run mode,
+    # already handled and returned above (line 221-224) - a real
+    # exception (not `assert`, which `python -O` strips, see
+    # protocol.build_start_charging's own re-validation for why this
+    # project treats that as a real bypass class, not a hypothetical
+    # one) narrows the type for every access below.
+    if result is None:
+        raise RuntimeError("start_charging_verified() returned None outside dry_run")
     if result.confirmed:
+        # confirmed=True is only ever set alongside a real info (see
+        # StartVerification's docstring) - same reasoning, one level down.
+        if result.info is None:
+            raise RuntimeError("StartVerification.confirmed=True with info=None")
         last_start.record(profile, pack=pack_name)
         print(
             f"sent and confirmed: {result.info.state_name}, "
@@ -396,7 +413,11 @@ def _resolve_serve_host_port(args: argparse.Namespace) -> tuple[str, int]:
         )
         sys.exit(2)
     if args.listen is not None:
-        return args.listen
+        # argparse.Namespace attributes are typed Any regardless of the
+        # parser's own `type=` callable - this cast just tells the type
+        # checker what build_parser() already guarantees at runtime
+        # (--listen's `type=httpd.parse_listen_address`).
+        return cast(tuple[str, int], args.listen)
     return (
         args.host if args.host is not None else httpd.DEFAULT_HOST,
         args.port if args.port is not None else httpd.DEFAULT_PORT,
