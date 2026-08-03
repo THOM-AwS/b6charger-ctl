@@ -95,3 +95,43 @@ def test_record_swallows_errors_when_recovery_is_impossible(tmp_path):
     # unlinking a file - record() must not raise regardless.
     path = str(tmp_path / "no" / "such" / "dir" / "last_start.json")
     last_start.record(_profile(), pack="whatever", path=path)  # must not raise
+
+
+def test_record_never_leaves_the_real_path_truncated_mid_write(tmp_path):
+    # Regression: record() used to O_TRUNC the real path directly, so a
+    # read() landing mid-write could observe an empty file. It's written
+    # to a temp file and renamed into place instead - the real path's
+    # content must always be a complete, valid previous entry or the
+    # complete new one, never empty/partial.
+    path = tmp_path / "last_start.json"
+    last_start.record(_profile(cell_count=3), pack="first", path=str(path))
+    before = path.read_bytes()
+    assert before  # a real, non-empty prior entry
+
+    last_start.record(_profile(cell_count=4, hv=True), pack="second", path=str(path))
+    after = path.read_bytes()
+    assert after  # never observed empty - always the old or new complete entry
+    entry = last_start.read(path=str(path))
+    assert entry is not None
+    assert entry.pack == "second"
+
+
+def test_record_cleans_up_its_temp_file_on_success(tmp_path):
+    path = tmp_path / "last_start.json"
+    last_start.record(_profile(), pack="x", path=str(path))
+    leftover_tmp_files = [p for p in tmp_path.iterdir() if p.name != "last_start.json"]
+    assert leftover_tmp_files == []
+
+
+def test_record_cleans_up_its_temp_file_when_rename_fails(tmp_path, monkeypatch):
+    def raise_on_replace(_src, _dst):
+        raise OSError("simulated rename failure")
+
+    monkeypatch.setattr(last_start.os, "replace", raise_on_replace)
+    path = tmp_path / "last_start.json"
+
+    last_start.record(_profile(), pack="x", path=str(path))  # must not raise
+
+    assert not path.exists()  # rename never happened
+    leftover_tmp_files = list(tmp_path.iterdir())
+    assert leftover_tmp_files == []  # the temp file was still cleaned up

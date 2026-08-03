@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from dataclasses import asdict, dataclass
 
@@ -58,6 +59,20 @@ def _mode_name(profile: protocol.ChargeProfile) -> str | None:
     return None
 
 
+def _best_effort_unlink(path: str) -> None:
+    """Remove `path` if possible; silently do nothing if it can't be removed.
+
+    Cleanup for a temp file that record() couldn't finish writing/
+    renaming - failing to clean up a leftover .tmp file is no worse
+    than the write failure that caused it, so this stays best-effort
+    the same way the rest of record() is.
+    """
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
 def record(
     profile: protocol.ChargeProfile,
     pack: str | None = None,
@@ -69,10 +84,21 @@ def record(
     time (not bound as a default argument) so tests can monkeypatch
     last_start.DEFAULT_PATH and have every caller pick it up.
 
-    Best-effort: failing to record this is a monitoring-accuracy
-    problem, not a reason to fail an already-sent charge command, so
-    any OSError is swallowed rather than raised. Recovers from a stale
-    file left unwritable by a different user the same way
+    Written atomically: the new content is written to a temp file next
+    to `path` (name includes the PID and thread id, so concurrent
+    writers - e.g. the HTTP daemon's own ThreadingHTTPServer worker
+    threads, or a separate `b6ctl start` process racing `serve` - can
+    never interleave writes into the same temp file) and then renamed
+    into place with os.replace(), which POSIX guarantees is atomic on
+    the same filesystem. Without this, read() landing between an
+    in-place truncate and the following write could observe an empty
+    file and silently drop the charger_last_commanded_* metrics for
+    that scrape.
+
+    Best-effort throughout: failing to record this is a monitoring-
+    accuracy problem, not a reason to fail an already-sent charge
+    command, so any OSError is swallowed rather than raised. Recovers
+    from a stale file left unwritable by a different user the same way
     transport.py's lock file does - see that module's
     `_open_lock_fd()` for why this happens on a shared /tmp path.
     """
@@ -86,23 +112,31 @@ def record(
         pack=pack,
     )
     body = json.dumps(asdict(entry)).encode()
+    tmp_path = f"{path}.tmp.{os.getpid()}.{threading.get_ident()}"
     flags = os.O_CREAT | os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW
     try:
-        fd = os.open(path, flags, 0o644)
+        fd = os.open(tmp_path, flags, 0o644)
     except PermissionError:
         try:
-            os.unlink(path)
-            fd = os.open(path, flags, 0o644)
+            os.unlink(tmp_path)
+            fd = os.open(tmp_path, flags, 0o644)
         except OSError:
             return
     except OSError:
         return
+
     try:
         os.write(fd, body)
     except OSError:
-        pass
-    finally:
         os.close(fd)
+        _best_effort_unlink(tmp_path)
+        return
+    os.close(fd)
+
+    try:
+        os.replace(tmp_path, path)
+    except OSError:
+        _best_effort_unlink(tmp_path)
 
 
 def read(path: str | None = None) -> LastStart | None:
