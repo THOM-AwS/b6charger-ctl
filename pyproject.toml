@@ -15,7 +15,13 @@ dependencies = []
 b6ctl = "b6charger.cli:main"
 
 [project.optional-dependencies]
-dev = ["pytest>=7", "ruff>=0.6", "black>=24", "bandit>=1.7"]
+# Pinned to match .pre-commit-config.yaml exactly (not just a loose
+# floor like the old ">=0.6"/">=24") - CI's `pip install -e ".[dev]"`
+# otherwise resolves whatever's newest at the time it happens to run,
+# which can silently diverge from what pre-commit enforces locally:
+# "passes pre-commit, fails CI lint" (or vice versa) with no config
+# change on either side. Bump both together when upgrading.
+dev = ["pytest>=7", "pytest-cov==7.1.0", "ruff==0.16.1", "black==26.5.1", "bandit==1.9.4"]
 
 [tool.setuptools]
 packages = ["b6charger"]

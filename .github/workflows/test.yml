@@ -14,7 +14,12 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -e ".[dev]"
-      - run: pytest -v
+      # 85%: a few points of headroom below the ~90% this suite actually
+      # hits as of this threshold's introduction - enough to catch a
+      # real regression without being so tight it flakes on incidental
+      # coverage shifts (e.g. a print-formatting branch or a real-
+      # hardware-only code path nobody's expected to unit test).
+      - run: pytest -v --cov=b6charger --cov-report=term-missing --cov-fail-under=85
 
   lint:
     runs-on: ubuntu-latest
