@@ -12,6 +12,16 @@ import pytest
 from b6charger import protocol
 
 
+def test_decode_u16_matches_manual_shift():
+    # Direct unit test for the shared decoder parse_charge_info and
+    # parse_sys_info both delegate to, in addition to the extensive
+    # indirect coverage those parsers already get below.
+    assert protocol._decode_u16(bytes([0x00, 0x00]), 0) == 0
+    assert protocol._decode_u16(bytes([0x01, 0x00]), 0) == 256
+    assert protocol._decode_u16(bytes([0xFF, 0xFF]), 0) == 0xFFFF
+    assert protocol._decode_u16(bytes([0x00, 0x12, 0x34]), 1) == 0x1234
+
+
 def test_get_charge_info_frame_matches_known_good_bytes():
     # Independently verified against a separate read-only exporter for
     # this same protocol, which has sent this exact frame to a real

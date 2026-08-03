@@ -244,6 +244,16 @@ def _u16(val: int) -> bytes:
     return bytes([(val >> 8) & 0xFF, val & 0xFF])
 
 
+def _decode_u16(buf: bytes, i: int) -> int:
+    """Decode a big-endian u16 from `buf` at offset `i` (bytes i, i+1).
+
+    Shared by parse_charge_info and parse_sys_info, which previously
+    each defined an identical local closure for this - mirrors `_u16`
+    above, the encode direction.
+    """
+    return (buf[i] << 8) | buf[i + 1]
+
+
 def _set_system_frame(param_id: int, value_bytes: bytes) -> bytes:
     """Build a SET_SYSTEM (0x11) frame for one parameter and its value bytes."""
     payload = bytes([0x00]) + value_bytes
@@ -621,7 +631,7 @@ def parse_charge_info(resp: bytes) -> ChargeInfo:
         raise ProtocolError(f"not a GET_CHARGE_INFO response: {resp[:8].hex()}")
 
     def u16(i: int) -> int:
-        return (resp[i] << 8) | resp[i + 1]
+        return _decode_u16(resp, i)
 
     state = resp[4]
     if state == State.CHARGING:
@@ -692,7 +702,7 @@ def parse_sys_info(resp: bytes) -> SysInfo:
         raise ProtocolError(f"not a GET_SYS_INFO response: {resp[:8].hex()}")
 
     def u16(i: int) -> int:
-        return (resp[i] << 8) | resp[i + 1]
+        return _decode_u16(resp, i)
 
     # offsets per Device::getSysInfo(), after the 4-byte header:
     # cycleTime(u8) timeLimitOn(u8) timeLimit(u16) capLimitOn(u8)

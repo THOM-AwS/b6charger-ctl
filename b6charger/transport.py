@@ -159,6 +159,21 @@ class HidRawTransport:
             os.close(lock_fd)
 
 
+def _encode_u16(val: int) -> tuple[int, int]:
+    """Encode `val` as a big-endian u16 (hi, lo) byte pair, bounds-checked.
+
+    Mirrors protocol.py's `_u16`/`_decode_u16` pair for the encode
+    direction on this side. `divmod(val, 256)` alone gives the right
+    byte order but no bounds check - assigning an out-of-range result
+    into a bytearray slot raises a bare, contextless `ValueError`
+    ("bytearray must be in range(0, 256)") instead of a message that
+    says which field was the problem.
+    """
+    if not 0 <= val <= 0xFFFF:
+        raise ValueError(f"value {val} out of u16 range")
+    return divmod(val, 256)
+
+
 class FakeChargerTransport:
     """A simulated charger for exercising the whole stack without hardware.
 
@@ -268,20 +283,20 @@ class FakeChargerTransport:
         if self.state in (protocol.State.IDLE, protocol.State.ERROR):
             if self.state == protocol.State.ERROR:
                 code = self.error_code if self.error_code is not None else 0xFFFF
-                buf[5], buf[6] = divmod(code, 256)
+                buf[5], buf[6] = _encode_u16(code)
             buf[13] = self.temp_ext_c
             buf[14] = self.temp_int_c
             return bytes(buf)
 
-        buf[5], buf[6] = divmod(self.capacity_mah, 256)
-        buf[7], buf[8] = divmod(self.elapsed_s, 256)
-        buf[9], buf[10] = divmod(self.pack_voltage_mv, 256)
-        buf[11], buf[12] = divmod(self.current_ma, 256)
+        buf[5], buf[6] = _encode_u16(self.capacity_mah)
+        buf[7], buf[8] = _encode_u16(self.elapsed_s)
+        buf[9], buf[10] = _encode_u16(self.pack_voltage_mv)
+        buf[11], buf[12] = _encode_u16(self.current_ma)
         buf[13] = self.temp_ext_c
         buf[14] = self.temp_int_c
-        buf[15], buf[16] = divmod(12, 256)  # impedance_mohm
+        buf[15], buf[16] = _encode_u16(12)  # impedance_mohm
         for i, mv in enumerate(self.cells_mv):
-            buf[17 + 2 * i], buf[18 + 2 * i] = divmod(mv, 256)
+            buf[17 + 2 * i], buf[18 + 2 * i] = _encode_u16(mv)
         return bytes(buf)
 
     def _encode_sys_info(self) -> bytes:
@@ -291,15 +306,15 @@ class FakeChargerTransport:
         buf[2] = protocol.Cmd.GET_SYS_INFO
         buf[4] = self.cycle_time
         buf[5] = int(self.time_limit_on)
-        buf[6], buf[7] = divmod(self.time_limit_minutes, 256)
+        buf[6], buf[7] = _encode_u16(self.time_limit_minutes)
         buf[8] = int(self.capacity_limit_on)
-        buf[9], buf[10] = divmod(self.capacity_limit_mah, 256)
+        buf[9], buf[10] = _encode_u16(self.capacity_limit_mah)
         buf[11] = int(self.key_buzzer)
         buf[12] = int(self.system_buzzer)
-        buf[13], buf[14] = divmod(self.low_dc_limit_mv, 256)
+        buf[13], buf[14] = _encode_u16(self.low_dc_limit_mv)
         # bytes 15-16 skipped per Device::getSysInfo()
         buf[17] = self.temp_limit_c
-        buf[18], buf[19] = divmod(self.pack_voltage_mv, 256)
+        buf[18], buf[19] = _encode_u16(self.pack_voltage_mv)
         for i, mv in enumerate(self.cells_mv):
-            buf[20 + 2 * i], buf[21 + 2 * i] = divmod(mv, 256)
+            buf[20 + 2 * i], buf[21 + 2 * i] = _encode_u16(mv)
         return bytes(buf)
