@@ -21,6 +21,18 @@ B6 / B6AC / B6 mini and rebadged clones sold under other brands (Jaycar
 POWERTECH PLUS MB-3633 / JMB-3633 is the one this was built and tested
 against).
 
+## Limitations
+
+**Single device only, at this point.** This project assumes exactly
+one charger connected to one host. Device discovery (auto-probe or
+`--device`) always resolves to one `/dev/hidraw*` path - `_discover()`
+returns the *first* device to answer, not a list - and nothing in the
+CLI, the HTTP API, or the `packs.toml` schema has any concept of
+addressing multiple simultaneously-connected chargers from a single
+`b6ctl`/`b6charger-httpd` instance. If you need to run more than one
+charger, run a separate instance per charger, each with its own
+`--device` and (for `serve`) its own `--listen` port.
+
 The vendor PC app for this hardware family ("Charge Master") is
 Windows-only, GUI-only, and closed source. This is a small,
 dependency-free Python library, CLI, and optional HTTP wrapper meant to
@@ -37,10 +49,13 @@ and current. Read the **Safety** section below before your first real
 ## Contents
 
 - [Why this exists](#why-this-exists)
+- [Limitations](#limitations)
 - [Install](#install)
+- [Hardware access (Linux permissions)](#hardware-access-linux-permissions)
 - [Configure your batteries](#configure-your-batteries)
 - [Command reference](#command-reference)
 - [HTTP API](#http-api)
+- [Running as a systemd service](#running-as-a-systemd-service)
 - [Grafana dashboard](#grafana-dashboard)
 - [Can this identify the battery automatically?](#can-this-identify-the-battery-automatically)
 - [Protocol notes](#protocol-notes--findings-worth-knowing-about)
@@ -80,6 +95,35 @@ If that prints a status block, the install worked. Everything below
 that touches real hardware, `--fake` runs against an in-memory
 simulated charger instead - useful for trying commands out safely
 before you ever point them at your device.
+
+## Hardware access (Linux permissions)
+
+`--fake` needs nothing beyond Python. Real hardware is a separate
+step: `/dev/hidraw*` device nodes are root-owned (`0600`) on most
+distros by default, so `b6ctl status` against the real charger will
+fail with a plain `PermissionError` until you either run as root
+(not recommended for a long-running `serve` daemon) or grant your own
+user access.
+
+The clean fix is a udev rule scoped to just this device, not a blanket
+hidraw permission change:
+
+```bash
+cd udev
+cp 99-b6charger.rules.example 99-b6charger.rules
+# edit idVendor/idProduct in the copy - see the comments in the file
+# for how to find them with lsusb
+sudo cp 99-b6charger.rules /etc/udev/rules.d/
+sudo udevadm control --reload-rules && sudo udevadm trigger
+sudo usermod -aG plugdev "$USER"   # then log out and back in
+```
+
+See [`udev/99-b6charger.rules.example`](udev/99-b6charger.rules.example)
+for the full walkthrough. This project doesn't ship a fixed
+vendor/product ID - the charger is sold under several rebadges (see
+[Why this exists](#why-this-exists)) that aren't confirmed to share
+one USB ID, so guessing one here would either silently not match your
+device or match the wrong one.
 
 ## Configure your batteries
 
@@ -470,6 +514,33 @@ cells, mode, pack}`, `charger_last_commanded_timestamp_seconds`, and
 `charger_last_commanded_current_milliamps` whenever a `start` has ever
 been sent - see "Can this identify the battery automatically?" below
 for why this exists and what it does and doesn't mean.
+
+## Running as a systemd service
+
+`serve` is meant to run long-lived, so this ships a generic,
+fill-in-the-placeholders unit template rather than leaving you to
+write one from scratch:
+[`systemd/b6charger-httpd.service.example`](systemd/b6charger-httpd.service.example).
+
+```bash
+cd systemd
+cp b6charger-httpd.service.example b6charger-httpd.service
+# fill in every CHANGE_ME - your install path, a non-root User= that
+# has hidraw access (see Hardware access above), and B6CTL_PACKS
+sudo cp b6charger-httpd.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now b6charger-httpd
+journalctl -u b6charger-httpd -f   # tail the logs
+```
+
+It defaults to the same safe posture the rest of this project uses:
+writes stay off until you deliberately uncomment `--enable-writes` in
+the unit and set `B6CTL_WRITE_TOKEN` via the commented-out
+`EnvironmentFile=` line - see [HTTP API](#http-api) above before
+turning that on. The template only covers a single charger, per
+[Limitations](#limitations) - install a second copy under a different
+unit name, with its own `--device`/`--listen`, if you have more than
+one.
 
 ## Grafana dashboard
 

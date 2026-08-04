@@ -1,0 +1,28 @@
+# Grants members of the "plugdev" group read/write access to this
+# charger's /dev/hidraw* device node, so b6ctl can run without root
+# or sudo.
+#
+# 1. Find your device's vendor/product ID (charger must be plugged in):
+#      lsusb
+#    Look for the SkyRC/iMAX B6-family charger - or its rebadge, e.g.
+#    Jaycar POWERTECH PLUS MB-3633/JMB-3633 - in the output:
+#      Bus 001 Device 004: ID XXXX:YYYY Some Vendor Some Product
+#    XXXX and YYYY below are that ID, lowercase, no "0x" prefix.
+#
+# 2. Fill in idVendor/idProduct below, then install:
+#      sudo cp 99-b6charger.rules.example /etc/udev/rules.d/99-b6charger.rules
+#      sudo udevadm control --reload-rules
+#      sudo udevadm trigger
+#
+# 3. Add yourself (or the systemd service's User=, see
+#    ../systemd/b6charger-httpd.service.example) to plugdev, then
+#    log out and back in (or restart the service):
+#      sudo usermod -aG plugdev "$USER"
+#
+# This project doesn't ship a fixed vendor/product ID: the charger is
+# sold under several rebadges and they aren't confirmed to share one
+# USB ID - filling in a wrong or invented ID here would silently fail
+# to match your device, or match the wrong one. Look yours up with
+# lsusb rather than guessing.
+
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="XXXX", ATTRS{idProduct}=="YYYY", MODE="0660", GROUP="plugdev"

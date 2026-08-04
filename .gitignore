@@ -11,3 +11,7 @@ htmlcov/
 
 # your real battery roster - never committed, see packs.example.toml
 packs.toml
+
+# your filled-in host config - never committed, see the .example files
+udev/99-b6charger.rules
+systemd/b6charger-httpd.service

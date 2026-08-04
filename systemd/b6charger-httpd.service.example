@@ -1,0 +1,50 @@
+# Copy to /etc/systemd/system/b6charger-httpd.service, fill in the
+# placeholders marked CHANGE_ME below for your host, then:
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now b6charger-httpd
+#
+# See the "Running as a systemd service" section in README.md.
+#
+# Ships in the safe default posture this project uses everywhere
+# else: writes (POST /start, /stop) stay off until you deliberately
+# add --enable-writes below, and B6CTL_WRITE_TOKEN is strongly
+# recommended the moment you do - see README's HTTP API section.
+
+[Unit]
+Description=b6charger-ctl HTTP daemon (b6ctl serve)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# A non-root user that's a member of the group your udev rule grants
+# hidraw access to (see ../udev/99-b6charger.rules.example) - do not
+# run this as root.
+User=CHANGE_ME
+
+# Wherever you cloned/installed this project.
+WorkingDirectory=CHANGE_ME_/opt/b6charger-ctl
+
+# Explicit path, not relative to WorkingDirectory - see README's
+# "Configure your batteries" section for why systemd needs this set
+# explicitly rather than relying on the CWD-relative default.
+Environment=B6CTL_PACKS=CHANGE_ME_/opt/b6charger-ctl/packs.toml
+
+# Uncomment and point at a file defining B6CTL_WRITE_TOKEN once you
+# add --enable-writes below - keeps the token out of `systemctl show`
+# / `ps` output and out of this unit file itself.
+# EnvironmentFile=CHANGE_ME_/etc/b6charger-ctl/write-token.env
+
+# Adjust the b6ctl path below if you didn't install into a venv at
+# WorkingDirectory (e.g. pipx or a system-wide pip install would put
+# it on PATH already - use ExecStart=b6ctl serve ... in that case).
+# Add --enable-writes here once you've set B6CTL_WRITE_TOKEN above.
+ExecStart=CHANGE_ME_/opt/b6charger-ctl/.venv/bin/b6ctl serve --listen 0.0.0.0:9111
+
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
