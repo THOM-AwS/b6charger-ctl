@@ -203,7 +203,7 @@ def test_parse_charge_info_filters_out_floating_pin_noise_above_max():
     assert info.cells_mv == (4197, 4201, 4192)
 
 
-def test_parse_charge_info_zeroes_pack_telemetry_and_temp_in_idle_state():
+def test_parse_charge_info_zeroes_pack_telemetry_but_not_temp_in_idle_state():
     # Observed 2026-08-02: with no battery physically connected, the
     # charger's own panel showed nothing wrong, and charger_state read
     # 2 - originally (wrongly) trusted as libb6's ERROR_1, corrected
@@ -212,8 +212,10 @@ def test_parse_charge_info_zeroes_pack_telemetry_and_temp_in_idle_state():
     # raw response still carried stale non-zero pack voltage/current
     # from before disconnection despite genuinely being idle, which is
     # why pack-derived fields stay conservatively zeroed here rather
-    # than guessed at. temp is zeroed (None) here too, for the same
-    # reason - see test_parse_charge_info_only_trusts_temp_while_charging.
+    # than guessed at. temp is NOT zeroed here (reverted 2026-08-04,
+    # see test_parse_charge_info_decodes_temp_in_every_state) - it's
+    # decoded the same as CHARGING, subject only to the plausibility
+    # filter, which is a known, accepted tradeoff, not an oversight.
     from b6charger.transport import FakeChargerTransport
 
     fake = FakeChargerTransport()
@@ -223,7 +225,7 @@ def test_parse_charge_info_zeroes_pack_telemetry_and_temp_in_idle_state():
     fake.cells_mv = (4197, 4201, 4192)
     fake.pack_voltage_mv = 12605
     fake.current_ma = 292
-    fake.temp_int_c = 24  # plausible-looking, but still not trusted while idle
+    fake.temp_int_c = 24  # plausible-looking - decoded, not zeroed, see above
 
     info = protocol.parse_charge_info(fake._encode_charge_info())
     assert info.state_name == "IDLE"
@@ -236,7 +238,7 @@ def test_parse_charge_info_zeroes_pack_telemetry_and_temp_in_idle_state():
     assert info.capacity_mah == 0
     assert info.time_s == 0
     assert info.impedance_mohm == 0
-    assert info.temp_int_c is None
+    assert info.temp_int_c == 24
 
 
 def test_parse_charge_info_zeroes_pack_telemetry_for_unrecognized_state_byte():
@@ -267,31 +269,24 @@ def test_parse_charge_info_zeroes_pack_telemetry_for_unrecognized_state_byte():
     assert info.error_code is None
 
 
-def test_parse_charge_info_only_trusts_temp_while_charging():
-    # Confirmed 2026-08-03: capacity/voltage/cells legitimately freeze
-    # at their final value once a charge completes - that's correct,
-    # it's the session's final result. temp freezes too, but unlike
-    # those fields it reads as a live sensor, and a genuinely frozen
-    # reading was observed staying completely plausible-looking for
-    # hours after the pack was disconnected (a Grafana dashboard stuck
-    # at a real-looking 24C long after the charge ended) - a range
-    # filter alone can't catch a frozen-but-plausible value. So temp is
-    # only trusted during the one state confirmed genuinely live -
-    # CHARGING - regardless of what the raw byte says in any other
-    # state, plausible-looking or not. See DRY_RUN.md.
+def test_parse_charge_info_decodes_temp_in_every_state():
+    # A CHARGING-only gate was added 2026-08-03 after a genuinely
+    # frozen-but-plausible temp reading was observed staying pinned at
+    # a real-looking 24C for hours after a pack was disconnected (see
+    # DRY_RUN.md) - a range filter alone can't catch "plausible but
+    # hours old." That gate was deliberately reverted 2026-08-04 by
+    # explicit request, after being shown this exact history: temp is
+    # decoded in every state again, so the frozen-value tradeoff above
+    # is knowingly back in play, not an oversight. See DRY_RUN.md's
+    # "Reversal, by explicit request" entry.
     from b6charger.transport import FakeChargerTransport
 
     fake = FakeChargerTransport()
     fake.temp_int_c = 22  # a perfectly plausible value
 
-    fake.state = protocol.State.CHARGING
-    assert protocol.parse_charge_info(fake._encode_charge_info()).temp_int_c == 22
-
-    fake.state = protocol.State.COMPLETE
-    assert protocol.parse_charge_info(fake._encode_charge_info()).temp_int_c is None
-
-    fake.state = protocol.State.IDLE
-    assert protocol.parse_charge_info(fake._encode_charge_info()).temp_int_c is None
+    for state in (protocol.State.CHARGING, protocol.State.COMPLETE, protocol.State.IDLE):
+        fake.state = state
+        assert protocol.parse_charge_info(fake._encode_charge_info()).temp_int_c == 22
 
 
 def test_parse_charge_info_rejects_implausible_temp_even_while_charging():
@@ -300,8 +295,12 @@ def test_parse_charge_info_rejects_implausible_temp_even_while_charging():
     # TempInt=248C while idle - physically impossible, and not
     # something this project's own concurrent access could have
     # caused, since buxtronix's tool never had concurrent access at
-    # all. Kept as defense in depth even now that temp is CHARGING-only
-    # - in case a genuinely-live read can also produce noise.
+    # all. TEMP_MIN_C/TEMP_MAX_C stays in effect in every state
+    # (temp decoding is no longer CHARGING-only, see
+    # test_parse_charge_info_decodes_temp_in_every_state) - this
+    # filter only ever catches flatly impossible values like this one,
+    # never a frozen-but-plausible reading; that's a known, separate
+    # limitation, not something this test claims to cover.
     from b6charger.transport import FakeChargerTransport
 
     fake = FakeChargerTransport()

@@ -731,3 +731,65 @@ def test_write_endpoints_check_enable_writes_before_token(running_server):
     with pytest.raises(urllib.error.HTTPError) as exc_info:
         urllib.request.urlopen(req)
     assert exc_info.value.code == 403
+
+
+def test_post_start_rejects_negative_content_length_header(running_server):
+    # Regression test: `BufferedReader.read(-1)` means "read until EOF,"
+    # not "read nothing" - a negative Content-Length previously slipped
+    # straight past the `length > MAX_BODY_BYTES` check (a negative
+    # number is never greater than a positive ceiling), letting a
+    # client bypass the body-size cap entirely instead of triggering
+    # the 413 it's supposed to.
+    base_url = running_server(enable_writes=True)
+    req = urllib.request.Request(f"{base_url}/start", data=b"{}", method="POST")
+    req.add_header("Content-Length", "-1")
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        urllib.request.urlopen(req)
+    assert exc_info.value.code == 413
+
+
+def test_concurrent_post_start_returns_409_for_the_second_request(running_server, monkeypatch):
+    # Regression test: HidRawTransport's flock only ever serialized a
+    # single USB transaction, not this whole multi-step operation -
+    # two concurrent POST /start against the same physical device
+    # could previously interleave, with one request's confirmation
+    # read observing a *different* request's write and reporting
+    # confirmed=True for the wrong profile. A lock now spans the whole
+    # device-touching part of do_POST, and a second concurrent write
+    # gets a fast 409 instead of racing.
+    entered = threading.Event()
+    release = threading.Event()
+
+    device = Device(FakeChargerTransport())
+    original_start = device.start_charging_verified
+
+    def slow_start(profile):
+        entered.set()
+        assert release.wait(timeout=5), "test never released the first request"
+        return original_start(profile)
+
+    monkeypatch.setattr(device, "start_charging_verified", slow_start)
+    monkeypatch.setattr("b6charger.device.time.sleep", lambda _s: None)
+
+    base_url = running_server(enable_writes=True, device=device)
+    body = json.dumps({"chemistry": "lipo", "cells": 3, "current_ma": 1500}).encode()
+    first_status = {}
+
+    def send_first():
+        req = urllib.request.Request(f"{base_url}/start", data=body, method="POST")
+        with urllib.request.urlopen(req) as resp:
+            first_status["code"] = resp.status
+
+    first_thread = threading.Thread(target=send_first)
+    first_thread.start()
+    assert entered.wait(timeout=5), "first request never reached start_charging_verified"
+
+    second_req = urllib.request.Request(f"{base_url}/start", data=body, method="POST")
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        urllib.request.urlopen(second_req)
+    assert exc_info.value.code == 409
+    assert "already in progress" in json.loads(exc_info.value.read())["error"]
+
+    release.set()
+    first_thread.join(timeout=5)
+    assert first_status["code"] == 200

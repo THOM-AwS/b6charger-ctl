@@ -347,7 +347,10 @@ def render_metrics(device: Device) -> str:
         lines += [
             "# HELP charger_temp_internal_celsius Charger's own internal temperature. "
             "Absent when the last reading was outside the plausible range - confirmed "
-            "2026-08-03 that this hardware can return implausible values while idle.",
+            "2026-08-03 that this hardware can return implausible values while idle. "
+            "Reported in every state (reverted 2026-08-04, see DRY_RUN.md): outside "
+            "CHARGING this can be a frozen last-known value, not a fresh reading - "
+            "cross-check charger_state before trusting it as current.",
             "# TYPE charger_temp_internal_celsius gauge",
             f"charger_temp_internal_celsius {info.temp_int_c}",
         ]
@@ -394,6 +397,16 @@ def make_handler(
     being True - see WRITE_TOKEN_ENV_VAR and the module docstring.
     None (the default) preserves the old enable_writes-only behavior.
     """
+    # HidRawTransport's flock only serializes a single USB transaction,
+    # not a whole logical operation - start_charging_verified() is a
+    # multi-second send/sleep/read/maybe-stop sequence. Without this,
+    # ThreadingHTTPServer can run two POST /start (or /start racing
+    # /stop) against the same physical device fully interleaved: one
+    # request's confirmation read can observe a *different* request's
+    # write, reporting confirmed=True for a profile the hardware isn't
+    # actually running. One lock per Device, held for the whole
+    # device-touching part of do_POST, closes that.
+    device_lock = threading.Lock()
 
     class Handler(BaseHTTPRequestHandler):
         """Handles one connection: GET /metrics, GET /status, POST /start, POST /stop."""
@@ -513,7 +526,7 @@ def make_handler(
             except ValueError:
                 self._json(400, {"error": "invalid Content-Length header"})
                 return
-            if length > MAX_BODY_BYTES:
+            if length < 0 or length > MAX_BODY_BYTES:
                 self._json(
                     413, {"error": f"body too large ({length} bytes, max {MAX_BODY_BYTES})"}
                 )
@@ -528,83 +541,101 @@ def make_handler(
                 self._json(400, {"error": "json body must be an object"})
                 return
 
-            if self.path == "/stop":
-                log.info("POST /stop from %s", self.client_address[0])
-                try:
-                    device.stop_charging()
-                except Exception as e:  # noqa: BLE001 - surface as a clean 502, not a crash
-                    log.exception("stop_charging failed")
-                    self._json(502, {"error": str(e)})
-                    return
-                self._json(200, {"ok": True, "dry_run": device.dry_run})
-                return
-
-            if "pack" in body:
-                profile_or_none = self._build_profile_from_pack(body)
-            else:
-                profile_or_none = self._build_profile_from_raw_body(body)
-            if profile_or_none is None:
-                return  # error response already sent by the helper above
-            profile = profile_or_none
-
-            log.info(
-                "POST /start from %s: %s cells=%s current_ma=%s",
-                self.client_address[0],
-                profile.battery_type.name,
-                profile.cell_count,
-                profile.charge_current_ma,
-            )
-            try:
-                result = device.start_charging_verified(profile)
-            except Exception as e:  # noqa: BLE001 - surface as a clean 502, not a crash
-                log.exception("start_charging_verified failed")
-                self._json(502, {"error": str(e)})
-                return
-            if device.dry_run:
-                self._json(200, {"ok": True, "dry_run": True})
-                return
-            # start_charging_verified() only returns None in dry_run mode,
-            # already handled and returned above. A real exception, not
-            # `assert` (which `python -O` strips - see
-            # protocol.build_start_charging's own re-validation for why
-            # this project treats that as a real bypass class), narrows
-            # the type for every access below.
-            if result is None:
-                raise RuntimeError("start_charging_verified() returned None outside dry_run")
-
-            if result.confirmed:
-                # confirmed=True is only ever set alongside a real info
-                # (see StartVerification's docstring) - same reasoning
-                # as above, one level down.
-                if result.info is None:
-                    raise RuntimeError("StartVerification.confirmed=True with info=None")
-                last_start.record(profile, pack=body.get("pack"))
-                self._json(
-                    200,
-                    {
-                        "ok": True,
-                        "confirmed": True,
-                        "state": result.info.state,
-                        "state_name": result.info.state_name,
-                        "cells_mv": list(result.info.cells_mv),
-                        "voltage_mv": result.info.voltage_mv,
-                    },
-                )
-            else:
+            if not device_lock.acquire(blocking=False):
                 log.warning(
-                    "POST /start from %s sent but not confirmed: %s",
+                    "rejected POST %s from %s - a device operation is already in progress",
+                    self.path,
                     self.client_address[0],
-                    result.reason,
                 )
                 self._json(
                     409,
-                    {
-                        "ok": False,
-                        "confirmed": False,
-                        "stopped": result.stopped,
-                        "error": result.reason,
-                    },
+                    {"error": "another /start or /stop is already in progress, retry shortly"},
                 )
+                return
+            try:
+                if self.path == "/stop":
+                    log.info("POST /stop from %s", self.client_address[0])
+                    try:
+                        device.stop_charging()
+                    except (
+                        Exception
+                    ) as e:  # noqa: BLE001 - surface as a clean 502, not a crash
+                        log.exception("stop_charging failed")
+                        self._json(502, {"error": str(e)})
+                        return
+                    self._json(200, {"ok": True, "dry_run": device.dry_run})
+                    return
+
+                if "pack" in body:
+                    profile_or_none = self._build_profile_from_pack(body)
+                else:
+                    profile_or_none = self._build_profile_from_raw_body(body)
+                if profile_or_none is None:
+                    return  # error response already sent by the helper above
+                profile = profile_or_none
+
+                log.info(
+                    "POST /start from %s: %s cells=%s current_ma=%s",
+                    self.client_address[0],
+                    profile.battery_type.name,
+                    profile.cell_count,
+                    profile.charge_current_ma,
+                )
+                try:
+                    result = device.start_charging_verified(profile)
+                except Exception as e:  # noqa: BLE001 - surface as a clean 502, not a crash
+                    log.exception("start_charging_verified failed")
+                    self._json(502, {"error": str(e)})
+                    return
+                if device.dry_run:
+                    self._json(200, {"ok": True, "dry_run": True})
+                    return
+                # start_charging_verified() only returns None in dry_run
+                # mode, already handled and returned above. A real
+                # exception, not `assert` (which `python -O` strips -
+                # see protocol.build_start_charging's own re-validation
+                # for why this project treats that as a real bypass
+                # class), narrows the type for every access below.
+                if result is None:
+                    raise RuntimeError(
+                        "start_charging_verified() returned None outside dry_run"
+                    )
+
+                if result.confirmed:
+                    # confirmed=True is only ever set alongside a real
+                    # info (see StartVerification's docstring) - same
+                    # reasoning as above, one level down.
+                    if result.info is None:
+                        raise RuntimeError("StartVerification.confirmed=True with info=None")
+                    last_start.record(profile, pack=body.get("pack"))
+                    self._json(
+                        200,
+                        {
+                            "ok": True,
+                            "confirmed": True,
+                            "state": result.info.state,
+                            "state_name": result.info.state_name,
+                            "cells_mv": list(result.info.cells_mv),
+                            "voltage_mv": result.info.voltage_mv,
+                        },
+                    )
+                else:
+                    log.warning(
+                        "POST /start from %s sent but not confirmed: %s",
+                        self.client_address[0],
+                        result.reason,
+                    )
+                    self._json(
+                        409,
+                        {
+                            "ok": False,
+                            "confirmed": False,
+                            "stopped": result.stopped,
+                            "error": result.reason,
+                        },
+                    )
+            finally:
+                device_lock.release()
 
         def _build_profile_from_raw_body(
             self, body: dict[str, Any]

@@ -600,3 +600,27 @@ bytes (offset 15-16) were checked directly on real hardware and read
 cross-referenced implementations offers an alternative either. As far
 as this project can tell, there simply isn't a live-idle temp source
 on this hardware family, not just this clone.
+
+## Reversal, by explicit request: temp decoded in every state again (2026-08-04)
+
+The CHARGING-only gate above was deliberately reverted the next day, at
+the maintainer's explicit request after being shown this exact
+history and choosing to accept the tradeoff anyway (asked twice,
+including a direct "this reintroduces the confirmed bug" framing).
+`temp_ext_c`/`temp_int_c` are decoded in every state again, gated only
+by the `TEMP_MIN_C`/`TEMP_MAX_C` plausibility filter - the same
+posture Round 1 above already proved insufficient.
+
+**What this knowingly reintroduces**: the frozen-but-plausible-value
+failure mode from the "second, complete fix" section above - a real
+temperature reading, frozen at whatever it was when a charge ended,
+can display for hours afterward looking exactly as trustworthy as a
+live one. Nothing about the underlying hardware changed between
+2026-08-03 and 2026-08-04; this is a product decision to prefer
+"often-current, occasionally stale-looking-live" data over "no data
+outside an active charge," not a new technical finding.
+
+If a temp reading looks stuck, cross-check
+`charger_last_commanded_timestamp_seconds` (when a charge was last
+started) and `charger_state` (is it still `CHARGING`?) before trusting
+it as current.

@@ -498,18 +498,25 @@ class ChargeInfo:
     one there would be actively wrong now that the two are known
     apart. See DRY_RUN.md for the full finding.
 
-    `temp_ext_c`/`temp_int_c` are `None` whenever `state != CHARGING` -
-    confirmed 2026-08-03: unlike capacity/time/voltage/cells (which
-    legitimately freeze at their final value once a charge completes -
-    that's what "final session results" means), temp freezes too, but
-    stays completely plausible-looking while doing it (a real capture
-    read a frozen 24C for hours after the pack was disconnected). A
-    range filter can't catch a frozen-but-plausible value, so temp is
-    only trusted during the one state confirmed genuinely live -
-    CHARGING - regardless of what the raw byte says elsewhere.
-    `TEMP_MIN_C`/`TEMP_MAX_C` (the same plausibility-filter pattern
-    `cells_mv` uses for `CELL_MIN_MV`/`CELL_MAX_MV`) still apply within
-    CHARGING as defense in depth. See DRY_RUN.md for the full timeline.
+    `temp_ext_c`/`temp_int_c` are decoded in every state, not just
+    CHARGING - reverted 2026-08-04 by explicit request, back to
+    displaying live/last-known temp at all times rather than only
+    during an active charge.
+
+    **Known limitation, not an oversight**: outside CHARGING this
+    project has found no way to distinguish a genuinely fresh reading
+    from a frozen one. Confirmed 2026-08-03: unlike capacity/time/
+    voltage/cells (which legitimately freeze at their final value once
+    a charge completes - that's what "final session results" means),
+    temp freezes too, but stays completely plausible-looking while
+    doing it (a real capture read a frozen 24C for hours after the
+    pack was disconnected) - `TEMP_MIN_C`/`TEMP_MAX_C` cannot catch
+    that, only flatly-impossible values like the 248C seen at idle on
+    genuine (non-clone) SkyRC hardware. A CHARGING-only gate closed
+    this gap correctly for one release (2026-08-03 to 2026-08-04); if
+    you re-encounter the "stuck-looking" dashboard reading, this is
+    why - see DRY_RUN.md for the full timeline of both the original
+    finding and this reversal.
     """
 
     state: int
@@ -610,19 +617,15 @@ def parse_charge_info(resp: bytes) -> ChargeInfo:
     `error_code` is only decoded for ERROR - IDLE and unrecognized
     states aren't errors, so u16(5) there isn't one either.
 
-    `temp_ext_c`/`temp_int_c` are ONLY decoded (non-None) when
-    `state == CHARGING` - confirmed 2026-08-03 (see ChargeInfo's
-    docstring and DRY_RUN.md) that temp freezes at whatever it read
-    when the charge session ended, the same as capacity/voltage/cells
-    do. Freezing is CORRECT for those session-summary fields (that's
-    what "final results" means), but temp isn't a session statistic -
-    it reads as a live sensor, so a frozen value is actively
-    misleading rather than merely stale (a live-looking dashboard
-    showing a temperature from hours ago, not now). COMPLETE still
-    trusts capacity/time/voltage/cells/impedance (legitimate final
-    session results) but not temp specifically. `_plausible_temp()`
-    is still applied as defense in depth even within CHARGING, in case
-    genuinely-live reads can also produce noise.
+    `temp_ext_c`/`temp_int_c` are decoded (subject to
+    `_plausible_temp()`'s `TEMP_MIN_C`/`TEMP_MAX_C` range filter) in
+    every state, not just CHARGING - reverted 2026-08-04 by explicit
+    request. See ChargeInfo's docstring for the known limitation this
+    reintroduces: outside CHARGING, a frozen-but-plausible temp (e.g.
+    a real capture stuck at 24C for hours after the pack was
+    disconnected) reads as live and there is no way to detect that
+    from the value alone - the range filter only catches flatly
+    impossible readings (e.g. 248C), not stale-but-believable ones.
 
     Raises ProtocolError if `resp` isn't shaped like a GET_CHARGE_INFO
     response at all (wrong length or command byte).
@@ -634,12 +637,8 @@ def parse_charge_info(resp: bytes) -> ChargeInfo:
         return _decode_u16(resp, i)
 
     state = resp[4]
-    if state == State.CHARGING:
-        temp_ext_c = _plausible_temp(resp[13])
-        temp_int_c = _plausible_temp(resp[14])
-    else:
-        temp_ext_c = None
-        temp_int_c = None
+    temp_ext_c = _plausible_temp(resp[13])
+    temp_int_c = _plausible_temp(resp[14])
 
     if state not in (s.value for s in _FULL_FRAME_STATES):
         return ChargeInfo(

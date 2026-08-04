@@ -465,16 +465,18 @@ caller's address first.
 >   and correctly **stay at their final value** after the charge
 >   completes, showing that session's results. That freeze is
 >   intentional/correct: it's the final summary, not a bug.
-> - `charger_temp_internal_celsius`/`charger_temp_external_celsius`
->   are different: they're **absent entirely (not `0`) any time
->   `charger_state` isn't `1` (CHARGING)** - including after a charge
->   completes. Unlike the fields above, a frozen temp reading looks
->   exactly like a live one (a real capture stayed at a plausible 24C
->   for hours after the pack was disconnected), so this project treats
->   it as unavailable rather than risk showing a stale reading as
->   current. **There is no known way to read temperature outside an
->   active charge on this hardware family** - not just this clone, see
->   [Protocol notes](#protocol-notes--findings-worth-knowing-about).
+> - `charger_temp_internal_celsius`/`charger_temp_external_celsius` are
+>   reported in every state, not just while charging (as of
+>   2026-08-04) - filtered only by a `[-20C, 100C]` plausibility range,
+>   not by whether the reading is actually fresh. **Known tradeoff, not
+>   a bug**: outside an active charge, this hardware has no live temp
+>   source at all (confirmed - not just on this clone, see
+>   [Protocol notes](#protocol-notes--findings-worth-knowing-about)),
+>   so a reading here can be a frozen last-known value from hours ago
+>   that looks exactly like a current one. If a temp value looks
+>   "stuck," cross-check `charger_state` (still `1`/CHARGING?) and
+>   `charger_last_commanded_timestamp_seconds` before trusting it as
+>   current.
 >
 > Pack voltage and per-cell voltage DO have a working idle-time
 > alternative: the `charger_sysinfo_*` metrics below. Don't mistake a
@@ -658,25 +660,30 @@ version might:
   `charger_sysinfo_pack_millivolts`/`charger_sysinfo_cell_millivolts`,
   separately from the `GET_CHARGE_INFO`-derived `charger_pack_millivolts`/
   `charger_cell_millivolts` (which stay zero until a charge starts).
-- **Temp is only trusted while `state == CHARGING`, full stop - not
-  IDLE, not COMPLETE either**: this took two rounds to get right.
-  First (2026-08-02) temp was decoded during IDLE/ERROR as a
-  "charger-hardware sensor, independent of pack state" - a restart
-  test disproved that (it read `0` right after boot, not a plausible
-  value). Then (2026-08-03) a plausibility filter was added
-  (`TEMP_MIN_C`/`TEMP_MAX_C`) after `buxtronix/b6max`'s own README
-  showed genuine SkyRC hardware reading `TempInt=248C` while idle -
-  physically impossible, confirming this isn't a clone quirk. But a
-  filter alone wasn't enough: capacity/voltage/cells legitimately
-  freeze at their final value once a charge completes (that's the
-  correct "final session result"), and it turns out temp freezes
-  there too - except a frozen temp reads as completely plausible,
-  since it's just whatever the real temperature was when charging
-  stopped. A live Grafana dashboard was observed stuck at a real
-  looking `24C` for hours after the pack was disconnected. No range
-  filter can catch "plausible but hours old", so `temp_ext_c`/
-  `temp_int_c` are now `None` in every state except `CHARGING`,
-  regardless of what the raw byte says.
+- **Temp is decoded in every state, filtered only by plausibility -
+  reverted 2026-08-04, with a known tradeoff.** This took two rounds to
+  get right, then was deliberately reverted a day later. First
+  (2026-08-02) temp was decoded during IDLE/ERROR as a "charger-hardware
+  sensor, independent of pack state" - a restart test disproved that
+  (it read `0` right after boot, not a plausible value). Then
+  (2026-08-03) a plausibility filter was added (`TEMP_MIN_C`/
+  `TEMP_MAX_C`) after `buxtronix/b6max`'s own README showed genuine
+  SkyRC hardware reading `TempInt=248C` while idle - physically
+  impossible, confirming this isn't a clone quirk. But a filter alone
+  wasn't enough: capacity/voltage/cells legitimately freeze at their
+  final value once a charge completes (that's the correct "final
+  session result"), and it turns out temp freezes there too - except a
+  frozen temp reads as completely plausible, since it's just whatever
+  the real temperature was when charging stopped. A live Grafana
+  dashboard was observed stuck at a real looking `24C` for hours after
+  the pack was disconnected - no range filter can catch "plausible but
+  hours old." A `CHARGING`-only gate closed that gap correctly. It was
+  then reverted (2026-08-04) by explicit maintainer request, after
+  being shown this exact history: `temp_ext_c`/`temp_int_c` are decoded
+  in every state again, so a temp reading can once more be a frozen
+  value silently indistinguishable from a live one outside an active
+  charge. See [`DRY_RUN.md`](DRY_RUN.md) for both the original finding
+  and the reversal.
 
 ## Safety
 
