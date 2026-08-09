@@ -1,0 +1,11 @@
+[Unit]
+Description=b6charger-ctl self-update (pull-based, see self_update.sh)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Needs root: writes /opt/b6charger-ctl (root-owned), writes
+# /etc/systemd/system, and runs systemctl. The httpd service itself
+# still runs unprivileged as tom - only the updater needs this.
+ExecStart=/bin/sh /opt/b6charger-ctl/src/systemd/charger-pi/self_update.sh

@@ -51,3 +51,12 @@ jobs:
           python-version: "3.12"
       - run: pip install -e ".[dev]"
       - run: bandit -r b6charger/
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Runs as root on charger-pi and does a tarball-based self-deploy
+      # (see systemd/charger-pi/self_update.sh) - worth the same static
+      # analysis bar as the Python side gets.
+      - run: shellcheck -s sh systemd/charger-pi/self_update.sh

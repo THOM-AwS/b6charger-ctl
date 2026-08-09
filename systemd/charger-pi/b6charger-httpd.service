@@ -1,0 +1,44 @@
+# Concrete, filled-in unit for the charger-pi deployment specifically
+# (Raspberry Pi, armv6l, /opt/b6charger-ctl checked out from this repo's
+# main branch). See ../b6charger-httpd.service.example for the generic,
+# fill-in-the-placeholders template this was derived from.
+#
+# Deployed and kept in sync by self_update.sh / b6charger-self-update.timer
+# - do not hand-edit the live /etc/systemd/system/b6charger-httpd.service
+# on charger-pi, it'll just get overwritten on the next update cycle.
+# Edit this file instead and push to main.
+
+[Unit]
+Description=b6charger-ctl HTTP daemon (b6ctl serve)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# tom is in the plugdev group the udev rule grants hidraw access to -
+# see ../udev/99-b6charger.rules.example. Not root.
+User=tom
+
+WorkingDirectory=/opt/b6charger-ctl/src
+
+# Explicit path, not relative to WorkingDirectory - see README's
+# "Configure your batteries" section for why systemd needs this set
+# explicitly rather than relying on the CWD-relative default.
+Environment=B6CTL_PACKS=/opt/b6charger-ctl/packs.toml
+
+# Port 9101, not the README example's 9111 - this is what charger-pi's
+# Prometheus agent (/etc/prometheus/agent.yml) actually scrapes.
+# Writes (--enable-writes) deliberately stay off here - starting/
+# stopping a charge over the network needs more thought than this
+# host's isolated-mesh threat model has had yet. Use the CLI directly
+# on-box for that (see README's "Configure your batteries" +
+# CLI usage) until that decision gets made deliberately.
+ExecStart=/usr/bin/python3 -m b6charger.cli serve --port 9101
+
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

@@ -544,6 +544,42 @@ turning that on. The template only covers a single charger, per
 unit name, with its own `--device`/`--listen`, if you have more than
 one.
 
+### Keeping a deployment updated: no CI push, pull instead
+
+There's no GitHub Actions workflow that deploys this anywhere - only
+`test.yml` (pytest/lint/types/mypy/bandit/shellcheck), gating merges to
+`main`. Whether and how a given host stays in sync with `main` is a
+per-host decision, not something this repo assumes.
+
+[`systemd/charger-pi/`](systemd/charger-pi/) is a worked example for a
+host that can't be reached by a push-based deploy at all: an isolated,
+resource-constrained (armv6l, sub-100MB free RAM) Raspberry Pi on a
+private mesh network with no route from any CI runner, but with proven
+outbound HTTPS access. Instead of a runner living on the mesh
+(not viable there - GitHub's Actions runner doesn't ship for armv6l,
+and there's no RAM to spare for one anyway), [`self_update.sh`](systemd/charger-pi/self_update.sh)
+runs on a timer, compares its deployed version against `main`'s
+`pyproject.toml` on GitHub, and if newer, downloads and extracts
+`main.tar.gz` itself - a tarball, not git/pip, since this project has
+zero third-party dependencies (`dependencies = []`) and neither git nor
+pip need to be installed for it to run. It also syncs this directory's
+own `.service`/`.timer` files into `/etc/systemd/system` if they've
+changed, so updating the deployment's own systemd units is just a
+normal commit to this repo too, not a separate manual step.
+
+The swap is atomic (build the new `src/` fully in a temp dir, `mv` it
+into place) and keeps one generation of rollback (`src.prev`, removed
+only after the post-update service restart succeeds) - deliberately
+more defensive than a plain `git pull` would be, given this same
+pattern (a stray copy left sitting under the install root, outside
+`src/`) is exactly what caused the 2026-08-03 "stale shadow copy"
+incident documented in `DRY_RUN.md`.
+
+If your deployment target can run a normal GitHub Actions runner and
+is network-reachable from one, you don't need any of this - a
+conventional push-on-merge deploy workflow is simpler and more
+immediate. This exists because that wasn't an option here.
+
 ## Grafana dashboard
 
 [`grafana/dashboard.json`](grafana/dashboard.json) is a ready-to-import

@@ -1,0 +1,11 @@
+[Unit]
+Description=Run b6charger-ctl self-update periodically
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=30min
+RandomizedDelaySec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
