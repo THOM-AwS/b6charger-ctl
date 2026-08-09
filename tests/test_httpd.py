@@ -131,7 +131,7 @@ def test_render_metrics_includes_last_commanded_when_recorded(tmp_path, monkeypa
         cell_count=4,
         charge_current_ma=1000,
         mode=protocol.ChargingModeLi.BALANCE,
-        hv=True,
+        chemistry="lihv",
     )
     last_start.record(profile, pack="hvpack4s")
 

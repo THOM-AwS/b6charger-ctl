@@ -105,6 +105,27 @@ def test_max_current_defaults_to_one_c_when_omitted(tmp_path):
     assert load_registry(path).get("p").max_current_ma == 2200
 
 
+def test_liion_chemistry_pack_validates_and_loads(tmp_path):
+    # A bare 18650/21700-style Li-ion pack, not LiPo/LiHV - see
+    # protocol.py's LITHIUM_CHEMISTRY_NAMES for why this is a distinct
+    # chemistry despite sharing LiPo's 4.20V/cell charge target.
+    path = _write(
+        tmp_path,
+        """
+        [[pack]]
+        name = "p"
+        description = "2S 18650, standard Li-ion"
+        chemistry = "liion"
+        cells = 2
+        capacity_mah = 3000
+        default_current_ma = 1500
+        """,
+    )
+    pack = load_registry(path).get("p")
+    assert pack.chemistry == "liion"
+    assert pack.is_hv is False
+
+
 @pytest.mark.parametrize(
     "bad_field_toml,expected_message_fragment",
     [

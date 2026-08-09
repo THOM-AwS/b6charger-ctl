@@ -20,7 +20,9 @@ def test_start_stop_round_trip():
 def test_dry_run_never_writes_to_transport():
     transport = FakeChargerTransport()
     dev = Device(transport, dry_run=True)
-    dev.start_charging(protocol.lipo_profile(cell_count=4, charge_current_ma=2000, hv=True))
+    dev.start_charging(
+        protocol.lipo_profile(cell_count=4, charge_current_ma=2000, chemistry="lihv")
+    )
     # the fake's state must be untouched - dry_run short-circuits before write()
     assert transport.state == protocol.State.COMPLETE
     assert transport.current_ma == 0
@@ -91,7 +93,7 @@ def test_start_charging_verified_stops_immediately_on_charger_reported_error():
 
     fake.transact = transact.__get__(fake)
     dev = Device(fake)
-    profile = protocol.lipo_profile(cell_count=4, charge_current_ma=1000, hv=True)
+    profile = protocol.lipo_profile(cell_count=4, charge_current_ma=1000, chemistry="lihv")
     result = dev.start_charging_verified(profile, confirm_delay_s=0, retry_delay_s=0)
 
     assert result.confirmed is False
@@ -149,7 +151,7 @@ def test_start_charging_verified_stops_on_cell_count_mismatch_even_if_charging()
     # real mismatch, not just slow state registration. Must still stop.
     fake = FakeChargerTransport()  # 3-cell default
     dev = Device(fake)
-    profile = protocol.lipo_profile(cell_count=4, charge_current_ma=1000, hv=True)
+    profile = protocol.lipo_profile(cell_count=4, charge_current_ma=1000, chemistry="lihv")
     result = dev.start_charging_verified(profile, confirm_delay_s=0, retry_delay_s=0)
 
     assert result.confirmed is False
@@ -224,7 +226,7 @@ def test_start_charging_verified_stops_safely_if_error_state_stop_raises():
 
     fake.transact = transact.__get__(fake)
     dev = Device(fake)
-    profile = protocol.lipo_profile(cell_count=4, charge_current_ma=1000, hv=True)
+    profile = protocol.lipo_profile(cell_count=4, charge_current_ma=1000, chemistry="lihv")
     result = dev.start_charging_verified(profile, confirm_delay_s=0, retry_delay_s=0)
 
     assert result.confirmed is False

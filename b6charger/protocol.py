@@ -393,16 +393,37 @@ DEFAULT_END_VOLTAGE_MV: dict[BatteryType, int] = {
 
 DEFAULT_DISCHARGE_CURRENT_MA = 1000  # libb6 Device::getDefaultChargeProfile default
 
+#: The lithium chemistry names this project's config layer (packs.toml,
+#: --chemistry, the HTTP API's "chemistry" field) accepts - see
+#: b6charger.packs.VALID_CHEMISTRIES, which must match this exactly.
+LITHIUM_CHEMISTRY_NAMES: dict[str, BatteryType] = {
+    "lipo": BatteryType.LIPO,
+    "lihv": BatteryType.LIHV,
+    "liion": BatteryType.LIION,
+}
+
 
 def lipo_profile(
     cell_count: int,
     charge_current_ma: int,
     mode: ChargingModeLi = ChargingModeLi.BALANCE,
-    hv: bool = False,
+    chemistry: str = "lipo",
     discharge_current_ma: int = DEFAULT_DISCHARGE_CURRENT_MA,
 ) -> ChargeProfile:
-    """Build a standard LiPo (4.20V/cell) or LiHV (4.35V/cell) charge profile."""
-    bt = BatteryType.LIHV if hv else BatteryType.LIPO
+    """Build a LiPo, LiHV, or Li-ion charge profile.
+
+    LiPo and Li-ion share a 4.20V/cell charge target; LiHV is 4.35V/cell.
+    Li-ion's discharge floor (3.10V/cell) is lower than LiPo's (3.20V/cell)
+    - a real chemistry difference, not just a different label for the
+    same voltage curve.
+    """
+    try:
+        bt = LITHIUM_CHEMISTRY_NAMES[chemistry]
+    except KeyError:
+        raise ProtocolError(
+            f"unknown chemistry {chemistry!r}, must be one of "
+            f"{sorted(LITHIUM_CHEMISTRY_NAMES)}"
+        ) from None
     return ChargeProfile(
         battery_type=bt,
         cell_count=cell_count,

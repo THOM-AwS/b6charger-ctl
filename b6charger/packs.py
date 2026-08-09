@@ -26,7 +26,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
-from b6charger.protocol import MAX_DEVICE_CURRENT_MA
+from b6charger.protocol import LITHIUM_CHEMISTRY_NAMES, MAX_DEVICE_CURRENT_MA
 
 #: Explicit override for where packs.toml lives, checked before any
 #: implicit location. Exists because CWD-relative lookup (the next
@@ -59,7 +59,13 @@ def _user_config_path() -> Path | None:
         return None
 
 
-VALID_CHEMISTRIES = {"lipo", "lihv"}
+#: Single source of truth is protocol.LITHIUM_CHEMISTRY_NAMES - this used
+#: to be its own hardcoded {"lipo", "lihv"} set, independent of the CLI's
+#: --chemistry choices and protocol.py's battery-type mapping. Three
+#: separate lists of "what chemistries exist" is exactly how something
+#: like liion support ends up half-wired (protocol.py had it, nothing
+#: else did) - deriving this one from protocol.py closes that gap.
+VALID_CHEMISTRIES = set(LITHIUM_CHEMISTRY_NAMES)
 
 #: This tool will never allow a configured current above this many times a
 #: pack's capacity, regardless of what its packs.toml entry claims - a
@@ -106,7 +112,7 @@ class Pack:
 
     name: str
     description: str
-    chemistry: str  #: "lipo" or "lihv" - validated in `_validate_pack`
+    chemistry: str  #: one of VALID_CHEMISTRIES - validated in `_validate_pack`
     cells: int
     capacity_mah: int
     default_current_ma: int

@@ -26,15 +26,21 @@
 #                      (brand, size, what it's for). Not used for safety
 #                      checks, purely a label.
 #
-#   chemistry          "lipo" for a standard LiPo/LiIon/LiFe pack (charges
-#                      to 4.20V/cell), or "lihv" for a High-Voltage pack
-#                      (charges to 4.35V/cell). THIS IS THE MOST IMPORTANT
-#                      FIELD - it's usually printed right on the pack
-#                      ("LiPo", "LiHV", "HV", or a max cell voltage of
-#                      4.35V rather than 4.20V). If you're not sure, use
-#                      "lipo" - charging a standard pack on the lipo
-#                      profile is always safe (if suboptimal); charging a
-#                      standard pack on the lihv profile is NOT safe.
+#   chemistry          "lipo" for a standard LiPo pouch pack (charges to
+#                      4.20V/cell), "liion" for a bare cylindrical Li-ion
+#                      cell like an 18650/21700 (also 4.20V/cell, but a
+#                      lower 3.10V/cell discharge floor than lipo's
+#                      3.20V/cell - a real chemistry difference, use
+#                      liion for these, not lipo), or "lihv" for a
+#                      High-Voltage pack (charges to 4.35V/cell). THIS IS
+#                      THE MOST IMPORTANT FIELD - it's usually printed
+#                      right on the pack/cell ("LiPo", "LiHV", "HV", "Li-
+#                      ion"/"ICR"/"INR"/"IMR", or a max cell voltage of
+#                      4.35V rather than 4.20V). If you're not sure
+#                      whether something is lihv, use "lipo" - charging a
+#                      standard pack on the lipo profile is always safe
+#                      (if suboptimal); charging a standard pack on the
+#                      lihv profile is NOT safe.
 #
 #   cells              The "S" number printed on the pack (3S = 3, 4S = 4,
 #                      etc). b6ctl will refuse to start a charge if the

@@ -49,6 +49,32 @@ def test_start_charging_frame_matches_hand_traced_bytes():
     assert len(frame) == 26
 
 
+def test_liion_profile_uses_liion_battery_type_and_its_own_discharge_floor():
+    # liion shares LiPo's 4.20V/cell charge target (end_voltage_mv) but
+    # NOT its discharge floor - a bare 18650/21700 cell's real end-of-
+    # discharge point (3.10V/cell) is lower than a LiPo pouch cell's
+    # (3.20V/cell). Modeling these as the same chemistry because the
+    # charge voltage matches would be wrong.
+    profile = protocol.lipo_profile(cell_count=2, charge_current_ma=1500, chemistry="liion")
+    assert profile.battery_type == protocol.BatteryType.LIION
+    assert profile.cell_discharge_voltage_mv == 3100
+    assert profile.end_voltage_mv == 4200
+
+
+def test_liion_frame_encodes_the_liion_battery_type_byte():
+    # Byte offset 4 is where battery_type lands - see the hand-traced
+    # LIPO frame above, whose comment documents this same layout.
+    frame = protocol.build_start_charging(
+        protocol.lipo_profile(cell_count=2, charge_current_ma=1500, chemistry="liion")
+    )
+    assert frame[4] == protocol.BatteryType.LIION
+
+
+def test_lipo_profile_rejects_unknown_chemistry_name():
+    with pytest.raises(protocol.ProtocolError, match="unknown chemistry"):
+        protocol.lipo_profile(cell_count=3, charge_current_ma=1500, chemistry="nicd")
+
+
 @pytest.mark.parametrize(
     "builder",
     [
@@ -73,7 +99,7 @@ def test_simple_frames_are_seven_bytes_with_correct_trailer(builder):
     [
         protocol.lipo_profile(cell_count=1, charge_current_ma=100),
         protocol.lipo_profile(cell_count=6, charge_current_ma=6000),
-        protocol.lipo_profile(cell_count=4, charge_current_ma=1500, hv=True),
+        protocol.lipo_profile(cell_count=4, charge_current_ma=1500, chemistry="lihv"),
         protocol.ChargeProfile(
             battery_type=protocol.BatteryType.NIMH,
             cell_count=6,

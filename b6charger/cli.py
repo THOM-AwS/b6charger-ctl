@@ -349,7 +349,7 @@ def _cmd_start(args: argparse.Namespace) -> None:
                 cell_count=args.cells,
                 charge_current_ma=args.current_ma,
                 mode=mode,
-                hv=(args.chemistry == "lihv"),
+                chemistry=args.chemistry,
                 discharge_current_ma=args.discharge_current_ma,
             )
         except protocol.ProtocolError as e:
@@ -506,7 +506,7 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument(
         "--pack", help="name of a pack from packs.toml (see 'b6ctl packs list')"
     )
-    start.add_argument("--chemistry", choices=["lipo", "lihv"])
+    start.add_argument("--chemistry", choices=["lipo", "lihv", "liion"])
     start.add_argument("--cells", type=int)
     start.add_argument(
         "--current-ma",

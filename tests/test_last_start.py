@@ -14,7 +14,7 @@ def _profile(**overrides):
         cell_count=3,
         charge_current_ma=1500,
         mode=protocol.ChargingModeLi.BALANCE,
-        hv=False,
+        chemistry="lipo",
     )
     defaults.update(overrides)
     return protocol.lipo_profile(**defaults)
@@ -27,7 +27,7 @@ def test_read_returns_none_when_nothing_recorded_yet(tmp_path):
 
 def test_record_then_read_round_trips(tmp_path):
     path = str(tmp_path / "last_start.json")
-    profile = _profile(cell_count=4, hv=True, charge_current_ma=1000)
+    profile = _profile(cell_count=4, chemistry="lihv", charge_current_ma=1000)
 
     last_start.record(profile, pack="hvpack4s", path=path)
     entry = last_start.read(path=path)
@@ -52,7 +52,7 @@ def test_record_without_pack_leaves_pack_none(tmp_path):
 def test_record_overwrites_the_previous_entry(tmp_path):
     path = str(tmp_path / "last_start.json")
     last_start.record(_profile(cell_count=3), pack="first", path=path)
-    last_start.record(_profile(cell_count=4, hv=True), pack="second", path=path)
+    last_start.record(_profile(cell_count=4, chemistry="lihv"), pack="second", path=path)
 
     entry = last_start.read(path=path)
     assert entry.cells == 4
@@ -108,7 +108,7 @@ def test_record_never_leaves_the_real_path_truncated_mid_write(tmp_path):
     before = path.read_bytes()
     assert before  # a real, non-empty prior entry
 
-    last_start.record(_profile(cell_count=4, hv=True), pack="second", path=str(path))
+    last_start.record(_profile(cell_count=4, chemistry="lihv"), pack="second", path=str(path))
     after = path.read_bytes()
     assert after  # never observed empty - always the old or new complete entry
     entry = last_start.read(path=str(path))

@@ -162,7 +162,7 @@ not guessing or measuring anything:
 [[pack]]
 name = "pack3s"              # what you'll type as --pack pack3s
 description = "2200mAh 3S, standard LiPo"
-chemistry = "lipo"             # "lipo" (4.20V/cell) or "lihv" (4.35V/cell)
+chemistry = "lipo"             # "lipo" (4.20V/cell), "lihv" (4.35V/cell), or "liion" (4.20V/cell, 18650/21700-style cylindrical cells)
 cells = 3                      # the "S" number printed on the pack
 capacity_mah = 2200             # the mAh rating printed on the pack
 default_current_ma = 1100       # used when you don't pass --current-ma (0.5C here)
@@ -172,7 +172,7 @@ default_current_ma = 1100       # used when you don't pass --current-ma (0.5C he
 |---|---|---|
 | `name` | Short id, no spaces - this is your `--pack NAME` argument | You choose it |
 | `description` | Free text label, purely for your own reference | You choose it |
-| `chemistry` | `"lipo"` (4.20V/cell) or `"lihv"` (4.35V/cell) - **the most important field** | Printed on the pack ("LiPo"/"LiHV"/"HV") |
+| `chemistry` | `"lipo"` (4.20V/cell), `"lihv"` (4.35V/cell), or `"liion"` (4.20V/cell, 3.10V/cell discharge floor) - **the most important field** | Printed on the pack ("LiPo"/"LiHV"/"HV"), or the cell's own datasheet for bare Li-ion cells (18650/21700/etc - most are standard 4.20V/cell unless explicitly marketed "high voltage") |
 | `cells` | The "S" number (3S = 3, 4S = 4, ...) | Printed on the pack |
 | `capacity_mah` | Capacity in mAh | Printed on the pack |
 | `default_current_ma` | Charge current used when `--current-ma` isn't given | Pick 0.5C (half the capacity) as a safe starting point |
@@ -293,7 +293,7 @@ b6ctl start --chemistry lipo --cells 3 --current-ma 1500
 | Flag | Values | Default | Meaning |
 |---|---|---|---|
 | `--pack` | a name from `packs.toml` | - | Use a configured pack. Mutually exclusive with `--chemistry`/`--cells`; runs the live cell-count safety check (see above) |
-| `--chemistry` | `lipo`, `lihv` | - | Standard LiPo (4.20V/cell) or High-Voltage (4.35V/cell). Required if not using `--pack`; error if used with `--pack` |
+| `--chemistry` | `lipo`, `lihv`, `liion` | - | Standard LiPo (4.20V/cell), High-Voltage (4.35V/cell), or Li-ion (4.20V/cell, 3.10V/cell discharge floor - bare cylindrical cells like 18650/21700). Required if not using `--pack`; error if used with `--pack` |
 | `--cells` | integer, 1-16 | - | Cell count ("S" number). Required if not using `--pack`; error if used with `--pack` |
 | `--current-ma` | integer, milliamps | pack's `default_current_ma` with `--pack`; **required** without it | Charge current. With `--pack`, capped at that pack's `max_current_ma` |
 | `--discharge-current-ma` | integer, milliamps | `1000` | Discharge current (only relevant in discharge/storage modes) |
@@ -313,15 +313,27 @@ detected itself), or never confirms after one retry, `b6ctl` sends
 uncertain whether a real charge is running. `--dry-run` skips this
 entirely, same as everything else it doesn't send.
 
-`chemistry` values in full, for reference (only `lipo`/`lihv` are
-exposed via this flag - the protocol layer in `protocol.py` also
-supports `LIION`/`LIFE`/`NIMH`/`NICD`/`PB` for anyone extending the
-CLI, see `BatteryType` in `protocol.py`):
+`chemistry` values in full, for reference (`lipo`/`lihv`/`liion` are
+exposed via this flag and `packs.toml`'s `chemistry` field - the
+protocol layer in `protocol.py` also supports `LIFE`/`NIMH`/`NICD`/`PB`
+for anyone extending the CLI further, see `BatteryType` in
+`protocol.py`):
 
-| Chemistry | Cutoff voltage | CLI flag value |
-|---|---|---|
-| Standard LiPo / LiIon / LiFe | 4.20V/cell | `lipo` |
-| High-Voltage LiPo (LiHV) | 4.35V/cell | `lihv` |
+| Chemistry | Cutoff voltage | Discharge floor | CLI flag value |
+|---|---|---|---|
+| Standard LiPo | 4.20V/cell | 3.20V/cell | `lipo` |
+| Li-ion (18650/21700/etc, standard) | 4.20V/cell | 3.10V/cell | `liion` |
+| High-Voltage LiPo (LiHV) | 4.35V/cell | 3.20V/cell | `lihv` |
+
+`lipo` and `liion` share the same 4.20V/cell charge target but have
+different discharge floors - Li-ion cylindrical cells' real end-of-
+discharge point is lower than a LiPo pouch cell's, which is why this
+project models them as two distinct chemistries even though a casual
+glance at just the charge voltage makes them look identical. Most bare
+18650/21700 cells are standard 4.20V/cell `liion` - the "high voltage"
+variants exist but are far less common and would need `lihv` instead
+if you have one specifically rated for it (check the cell's own
+datasheet, not just its form factor).
 
 `--mode` values in full:
 

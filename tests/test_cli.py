@@ -66,6 +66,27 @@ def test_start_dry_run_does_not_prompt(capsys, monkeypatch):
     assert "LIPO" in out
 
 
+def test_start_dry_run_accepts_liion_chemistry(capsys):
+    parser = cli.build_parser()
+    args = parser.parse_args(
+        [
+            "--fake",
+            "start",
+            "--chemistry",
+            "liion",
+            "--cells",
+            "2",
+            "--current-ma",
+            "1500",
+            "--dry-run",
+        ]
+    )
+    args.func(args)
+    out = capsys.readouterr().out
+    assert "dry-run" in out.lower()
+    assert "LIION" in out
+
+
 def test_start_yes_skips_prompt(capsys, monkeypatch):
     def fail_input(_prompt):
         raise AssertionError("input() called despite --yes")

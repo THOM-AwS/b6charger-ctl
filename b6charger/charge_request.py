@@ -101,7 +101,7 @@ def build_raw_profile(body: dict[str, Any]) -> protocol.ChargeProfile:
             cell_count=cells,
             charge_current_ma=current_ma,
             mode=mode,
-            hv=(body.get("chemistry") == "lihv"),
+            chemistry=body.get("chemistry", "lipo"),
             discharge_current_ma=discharge_current_ma,
         )
     except protocol.ProtocolError as e:
@@ -171,7 +171,7 @@ def build_pack_profile(
             cell_count=pack.cells,
             charge_current_ma=resolved_current_ma,
             mode=chemistry_mode,
-            hv=pack.is_hv,
+            chemistry=pack.chemistry,
             discharge_current_ma=resolved_discharge_ma,
         )
     except protocol.ProtocolError as e:
