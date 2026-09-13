@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 
-from b6charger import cli
+import pytest
+
+from b6charger import cli, packs
 from b6charger.transport import FakeChargerTransport
 
 
@@ -611,3 +613,72 @@ def test_set_limits_with_neither_buzzer_flag_does_not_touch_buzzers(monkeypatch,
     capsys.readouterr()
     assert fake.key_buzzer is True  # FakeChargerTransport's own default, untouched
     assert fake.system_buzzer is True
+
+
+# --- serve: --port must be range-checked like --listen already is ---------
+
+
+@pytest.mark.parametrize("bad_port", ["0", "65536", "99999", "-1", "abc"])
+def test_serve_rejects_out_of_range_port_as_usage_error(bad_port, capsys):
+    parser = cli.build_parser()
+    with pytest.raises(SystemExit) as exc_info:
+        parser.parse_args(["serve", "--port", bad_port])
+    assert exc_info.value.code == 2
+    assert "port" in capsys.readouterr().err.lower()
+
+
+def test_serve_accepts_in_range_port():
+    parser = cli.build_parser()
+    args = parser.parse_args(["serve", "--port", "9101"])
+    assert args.port == 9101
+
+
+# --- serve: an empty B6CTL_WRITE_TOKEN must behave exactly like unset -----
+
+
+def test_resolve_write_token_returns_none_when_writes_disabled():
+    assert cli._resolve_write_token(False, {cli.httpd.WRITE_TOKEN_ENV_VAR: "abc"}) is None
+
+
+def test_resolve_write_token_returns_value_when_set():
+    assert cli._resolve_write_token(True, {cli.httpd.WRITE_TOKEN_ENV_VAR: "abc"}) == "abc"
+
+
+def test_resolve_write_token_treats_empty_string_as_unset(caplog):
+    with caplog.at_level("WARNING"):
+        token = cli._resolve_write_token(True, {cli.httpd.WRITE_TOKEN_ENV_VAR: ""})
+    assert token is None
+    assert "empty" in caplog.text.lower()
+
+
+def test_resolve_write_token_treats_whitespace_only_as_unset():
+    assert cli._resolve_write_token(True, {cli.httpd.WRITE_TOKEN_ENV_VAR: "   "}) is None
+
+
+# --- packs list: distinguish Li-ion from LiPo at a glance ----------------
+
+
+def test_packs_list_labels_liion_packs(tmp_path, monkeypatch, capsys):
+    registry = tmp_path / "packs.toml"
+    registry.write_text(
+        "\n".join(
+            [
+                "[[pack]]",
+                'name = "cyl_18650"',
+                'description = "2x 18650 in series"',
+                'chemistry = "liion"',
+                "cells = 2",
+                "capacity_mah = 3000",
+                "default_current_ma = 1000",
+                "max_current_ma = 1500",
+                "",
+            ]
+        )
+    )
+    monkeypatch.setenv(packs.PACKS_PATH_ENV_VAR, str(registry))
+    parser = cli.build_parser()
+    args = parser.parse_args(["packs", "list"])
+    args.func(args)
+    out = capsys.readouterr().out
+    assert "cyl_18650" in out
+    assert "(Li-ion)" in out

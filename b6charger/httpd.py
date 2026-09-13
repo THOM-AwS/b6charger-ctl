@@ -104,9 +104,34 @@ REQUEST_TIMEOUT_S = 10.0
 #: cli.py's _cmd_serve at startup, not by this module directly - kept
 #: as a plain env var rather than a CLI flag so the token itself never
 #: appears in `ps`/shell history/systemd unit files.
+#: What a client sees in the JSON `error` field when talking to the
+#: charger fails mid-request. Deliberately generic: the underlying
+#: exception text can include the raw wire frame (hex) and local
+#: filesystem paths (the flock file), which belong in the server log
+#: (`log.exception` keeps the full detail there), not in a response to
+#: an arbitrary network client.
+DEVICE_ERROR_MESSAGE = "device communication failed - see the server log for details"
+
 WRITE_TOKEN_ENV_VAR = "B6CTL_WRITE_TOKEN"  # nosec B105 - an env var NAME, not a secret value
 
 STATE_HELP = {s.value: s.name for s in protocol.State}
+
+
+def parse_port(value: str) -> int:
+    """Parse a TCP port for --port / --listen, as an argparse `type=`.
+
+    Rejects anything outside 1-65535 with argparse.ArgumentTypeError so
+    a typo like `--port 99999` is a one-line usage error, not the raw
+    `OverflowError: bind(): port must be 0-65535` traceback that
+    socket.bind() would otherwise raise long after argument parsing.
+    """
+    try:
+        port = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{value!r} is not a valid port number") from None
+    if not 1 <= port <= 65535:
+        raise argparse.ArgumentTypeError(f"port {port} out of range 1-65535")
+    return port
 
 
 def parse_listen_address(value: str) -> tuple[str, int]:
@@ -130,16 +155,9 @@ def parse_listen_address(value: str) -> tuple[str, int]:
         )
 
     try:
-        port = int(port_str)
-    except ValueError:
-        raise argparse.ArgumentTypeError(
-            f"invalid --listen value {value!r} - {port_str!r} is not a valid port number"
-        ) from None
-
-    if not 1 <= port <= 65535:
-        raise argparse.ArgumentTypeError(
-            f"invalid --listen value {value!r} - port {port} out of range 1-65535"
-        )
+        port = parse_port(port_str)
+    except argparse.ArgumentTypeError as e:
+        raise argparse.ArgumentTypeError(f"invalid --listen value {value!r} - {e}") from None
 
     return host, port
 
@@ -463,9 +481,9 @@ def make_handler(
                 return
             try:
                 info = device.get_charge_info()
-            except Exception as e:  # noqa: BLE001 - surface to caller, don't swallow
+            except Exception:  # noqa: BLE001 - surface to caller, don't swallow
                 log.exception("get_charge_info failed")
-                self._json(502, {"error": str(e)})
+                self._json(502, {"error": DEVICE_ERROR_MESSAGE})
                 return
             self._json(
                 200,
@@ -557,11 +575,9 @@ def make_handler(
                     log.info("POST /stop from %s", self.client_address[0])
                     try:
                         device.stop_charging()
-                    except (
-                        Exception
-                    ) as e:  # noqa: BLE001 - surface as a clean 502, not a crash
+                    except Exception:  # noqa: BLE001 - surface as a clean 502, not a crash
                         log.exception("stop_charging failed")
-                        self._json(502, {"error": str(e)})
+                        self._json(502, {"error": DEVICE_ERROR_MESSAGE})
                         return
                     self._json(200, {"ok": True, "dry_run": device.dry_run})
                     return
@@ -583,9 +599,9 @@ def make_handler(
                 )
                 try:
                     result = device.start_charging_verified(profile)
-                except Exception as e:  # noqa: BLE001 - surface as a clean 502, not a crash
+                except Exception:  # noqa: BLE001 - surface as a clean 502, not a crash
                     log.exception("start_charging_verified failed")
-                    self._json(502, {"error": str(e)})
+                    self._json(502, {"error": DEVICE_ERROR_MESSAGE})
                     return
                 if device.dry_run:
                     self._json(200, {"ok": True, "dry_run": True})
@@ -694,9 +710,9 @@ def make_handler(
             except charge_request.InvalidStartRequest as e:
                 self._json(400, {"error": str(e)})
                 return None
-            except Exception as e:  # noqa: BLE001 - device I/O failure -> 502, not a crash
+            except Exception:  # noqa: BLE001 - device I/O failure -> 502, not a crash
                 log.exception("device I/O failed while building a pack-based start profile")
-                self._json(502, {"error": str(e)})
+                self._json(502, {"error": DEVICE_ERROR_MESSAGE})
                 return None
 
         def log_message(self, format: str, *args: Any) -> None:  # stdlib signature

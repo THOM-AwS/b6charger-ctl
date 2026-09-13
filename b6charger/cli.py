@@ -31,6 +31,7 @@ import json
 import logging
 import os
 import sys
+from collections.abc import Mapping
 from http.server import ThreadingHTTPServer
 from typing import cast
 
@@ -168,6 +169,12 @@ def _cmd_sysinfo(args: argparse.Namespace) -> None:
         print(f"  cell {i}:   {mv / 1000:.3f}V")
 
 
+#: Short chemistry marker for `packs list`. LiPo (the common case) stays
+#: unmarked, as it always was; the others are called out because they
+#: charge or discharge to materially different voltages.
+_CHEMISTRY_BADGES = {"lihv": " (HV)", "liion": " (Li-ion)"}
+
+
 def _cmd_packs_list(args: argparse.Namespace) -> None:
     """Handle `b6ctl packs list`: print every pack in the registry."""
     registry = packs.load_registry()
@@ -175,9 +182,9 @@ def _cmd_packs_list(args: argparse.Namespace) -> None:
     if warning is not None:
         print(f"({warning})\n")
     for pack in registry:
-        hv = " (HV)" if pack.is_hv else ""
+        badge = _CHEMISTRY_BADGES.get(pack.chemistry, "")
         print(
-            f"{pack.name:20s} {pack.cells}S{hv:5s} {pack.capacity_mah:6d}mAh  "
+            f"{pack.name:20s} {pack.cells}S{badge:9s} {pack.capacity_mah:6d}mAh  "
             f"default {pack.default_current_ma}mA, max {pack.max_current_ma}mA"
         )
         print(f"{'':20s} {pack.description}")
@@ -424,6 +431,32 @@ def _resolve_serve_host_port(args: argparse.Namespace) -> tuple[str, int]:
     )
 
 
+def _resolve_write_token(enable_writes: bool, env: Mapping[str, str]) -> str | None:
+    """Return the bearer token `serve` should require on writes, or None.
+
+    None means "no per-request auth" - which is also exactly what an
+    env var that is set but EMPTY must mean. Before this existed,
+    `B6CTL_WRITE_TOKEN=` (a blank value, e.g. an unfilled template in a
+    unit file) reached the auth check as "", and `hmac.compare_digest("",
+    "")` is True for a request with no Authorization header at all - so
+    the gate looked configured but let everything through. Collapsing
+    blank to None makes the startup warning and the gate agree.
+    """
+    if not enable_writes:
+        return None
+    raw = env.get(httpd.WRITE_TOKEN_ENV_VAR)
+    if raw is None:
+        return None
+    token = raw.strip()
+    if not token:
+        log.warning(
+            "%s is set but empty - ignoring it and treating writes as unauthenticated",
+            httpd.WRITE_TOKEN_ENV_VAR,
+        )
+        return None
+    return token
+
+
 def _cmd_serve(args: argparse.Namespace) -> None:
     """Handle `b6ctl serve`: run the HTTP daemon forever.
 
@@ -439,10 +472,9 @@ def _cmd_serve(args: argparse.Namespace) -> None:
     dev = Device(_make_transport(args), dry_run=args.dry_run)
     metrics_cache = httpd.MetricsCache(lambda: httpd.render_metrics(dev), args.cache_seconds)
 
-    write_token = os.environ.get(httpd.WRITE_TOKEN_ENV_VAR) if args.enable_writes else None
-
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", force=True)
-    if args.enable_writes and not write_token:
+    write_token = _resolve_write_token(args.enable_writes, os.environ)
+    if args.enable_writes and write_token is None:
         log.warning(
             "starting with --enable-writes and no %s set - POST /start and /stop "
             "will be reachable by ANYONE who can connect to %s:%s, with no per-"
@@ -569,7 +601,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     serve.add_argument(
         "--port",
-        type=int,
+        type=httpd.parse_port,
         default=None,
         help=f"port to bind (default: {httpd.DEFAULT_PORT})",
     )

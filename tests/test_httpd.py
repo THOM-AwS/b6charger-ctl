@@ -21,6 +21,7 @@ from http.server import ThreadingHTTPServer
 
 import pytest
 
+from b6charger import last_start
 from b6charger.device import Device
 from b6charger.httpd import (
     DEFAULT_HOST,
@@ -29,7 +30,7 @@ from b6charger.httpd import (
     parse_listen_address,
     render_metrics,
 )
-from b6charger.transport import FakeChargerTransport
+from b6charger.transport import DeviceTimeout, FakeChargerTransport
 
 # --- --listen parsing -----------------------------------------------
 
@@ -793,3 +794,60 @@ def test_concurrent_post_start_returns_409_for_the_second_request(running_server
     release.set()
     first_thread.join(timeout=5)
     assert first_status["code"] == 200
+
+
+# --- error bodies must not leak wire frames or filesystem paths -----------
+
+
+def test_status_502_body_does_not_leak_transport_details(running_server):
+    device = Device(FakeChargerTransport())
+
+    def boom():
+        raise DeviceTimeout(
+            "no response within 1.0s to frame 0f03555555ffff - check nothing else is talking"
+        )
+
+    device.get_charge_info = boom  # type: ignore[method-assign]
+    base_url = running_server(enable_writes=False, device=device)
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        urllib.request.urlopen(f"{base_url}/status")
+    assert exc_info.value.code == 502
+    body = json.loads(exc_info.value.read().decode())
+    assert "0f03555555ffff" not in body["error"]
+    assert "frame" not in body["error"]
+    assert body["error"]  # still a non-empty, human-readable message
+
+
+def test_start_502_body_does_not_leak_lock_path(running_server):
+    device = Device(FakeChargerTransport())
+
+    def boom(_profile):
+        raise OSError(
+            "could not recover a stale, unwritable lock file at /tmp/b6charger-ctl.lock"
+        )
+
+    device.start_charging_verified = boom  # type: ignore[method-assign]
+    base_url = running_server(enable_writes=True, device=device)
+    body = json.dumps({"chemistry": "lipo", "cells": 3, "current_ma": 1000}).encode()
+    req = urllib.request.Request(f"{base_url}/start", data=body, method="POST")
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        urllib.request.urlopen(req)
+    assert exc_info.value.code == 502
+    err = json.loads(exc_info.value.read().decode())["error"]
+    assert "/tmp/" not in err
+
+
+# --- Li-ion over the network path, not just the CLI -----------------------
+
+
+def test_post_start_with_liion_chemistry_records_liion(running_server, tmp_path, monkeypatch):
+    monkeypatch.setattr("b6charger.device.time.sleep", lambda _s: None)
+    monkeypatch.setattr(last_start, "DEFAULT_PATH", str(tmp_path / "last.json"))
+    base_url = running_server(enable_writes=True)
+    body = json.dumps({"chemistry": "liion", "cells": 3, "current_ma": 1000}).encode()
+    req = urllib.request.Request(f"{base_url}/start", data=body, method="POST")
+    with urllib.request.urlopen(req) as resp:
+        assert resp.status == 200
+    entry = last_start.read()
+    assert entry is not None
+    assert entry.battery_type == "LIION"
