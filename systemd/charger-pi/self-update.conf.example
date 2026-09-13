@@ -1,0 +1,28 @@
+# Optional configuration for self_update.sh. Copy to
+# /etc/default/b6charger-self-update on the host (the path the script
+# reads by default; B6_SELF_UPDATE_CONFIG overrides it). Plain sh
+# assignments, sourced by the script - every line here is optional and
+# shows the built-in default.
+#
+# Which repo and branch to follow. Point these at your fork if you run one.
+#REPO_OWNER="THOM-AwS"
+#REPO_NAME="b6charger-ctl"
+#BRANCH="main"
+#
+# Where the code lives and what the daemon's unit is called.
+#INSTALL_DIR="/opt/b6charger-ctl"
+#SERVICE_NAME="b6charger-httpd"
+#SYSTEMD_DIR="/etc/systemd/system"
+#
+# Post-restart health check. Empty means: derive from the live unit's
+# --port / --listen and probe http://127.0.0.1:PORT/metrics. Set it
+# explicitly if the daemon binds a specific interface address.
+#HEALTH_URL=""
+#HEALTH_TIMEOUT_S="30"
+#
+# Network bounds for a small host.
+#CURL_MAX_TIME_S="60"
+#MAX_TARBALL_BYTES="20971520"
+#
+# A lower version on the branch is refused unless this is "1".
+#ALLOW_DOWNGRADE="0"
