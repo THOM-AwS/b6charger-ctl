@@ -40,7 +40,7 @@ fi
 
 local_version="none"
 if [ -f "$VERSION_FILE" ]; then
-  local_version=$(cat "$VERSION_FILE" | tr -d 'v \n')
+  local_version=$(tr -d 'v \n' < "$VERSION_FILE")
 fi
 
 if [ "$local_version" = "$remote_version" ]; then
