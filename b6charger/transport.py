@@ -135,6 +135,16 @@ class HidRawTransport:
         purely an empty advisory lock - a permission error on open is safe
         to resolve by removing and recreating it, once.
 
+        The file is opened READ-ONLY: flock(2) locks the open file
+        description regardless of its access mode, so write permission is
+        never needed. That matters on a sticky /tmp, where a lock file
+        left behind by another user (root's, after the service moved to
+        an unprivileged account) is readable but neither writable nor
+        unlinkable by us - with O_RDWR the recovery below cannot help and
+        every device transaction fails. Confirmed in production
+        2026-09-13: the daemon came up as `tom` against root's 0644 lock,
+        reported charger_up 0, and the deploy rolled back.
+
         Unlike last_start.py's equivalent recovery, a failure here isn't
         swallowed: that file's whole purpose is serializing concurrent
         hardware access (see the module docstring's stuck-`stop` story),
@@ -147,7 +157,7 @@ class HidRawTransport:
         OSError, so it's caught the same way by every existing caller
         (main()'s top-level handler, httpd.py's request handlers).
         """
-        flags = os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW
+        flags = os.O_CREAT | os.O_RDONLY | os.O_NOFOLLOW
         try:
             return os.open(self._lock_path, flags, 0o666)
         except PermissionError:

@@ -9,6 +9,9 @@ is the only way to exercise the timeout branch without real hardware.
 
 from __future__ import annotations
 
+import fcntl
+import os
+
 import pytest
 
 from b6charger.transport import DeviceTimeout, HidRawTransport
@@ -117,3 +120,27 @@ def test_transact_raises_a_clear_error_when_lock_recovery_also_fails(tmp_path, m
     )
     with pytest.raises(OSError, match="could not recover a stale"):
         transport.transact(b"\x0f\x03\x55\x00\x55\xff\xff")
+
+
+def test_open_lock_fd_uses_a_read_only_lock_file_without_replacing_it(tmp_path):
+    """A root-owned 0644 lock left in a sticky /tmp is the production case.
+
+    flock(2) does not need write access, so the lock must open read-only
+    and leave the file alone - unlinking it is impossible for a different
+    user on a sticky directory, which is exactly how the 0.9.1 deploy of
+    charger-pi failed its health check and rolled back (2026-09-13).
+    """
+    lock_path = tmp_path / "lock"
+    lock_path.touch()
+    lock_path.chmod(0o444)
+    inode_before = lock_path.stat().st_ino
+    transport = HidRawTransport(device_path="/dev/null", lock_path=str(lock_path))
+
+    fd = transport._open_lock_fd()
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+    assert lock_path.stat().st_ino == inode_before  # not unlinked and recreated
