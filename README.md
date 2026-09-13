@@ -9,6 +9,12 @@
 > configuration could cause a house fire. You have been warned. See
 > [`DISCLAIMER.md`](DISCLAIMER.md) and the **Safety** section below.
 
+**Pull requests welcome.** If you want to contribute, I'll accept PRs:
+bug fixes, support for other B6 rebadges, docs, tests, anything that
+makes this safer or easier to use. [`CONTRIBUTING.md`](CONTRIBUTING.md)
+has the short version of how changes get checked, including against
+real hardware.
+
 Linux Headless Battery Charger Network Controller/exporter
 
 I use this library to control my LiPo battery charger in my garage,
