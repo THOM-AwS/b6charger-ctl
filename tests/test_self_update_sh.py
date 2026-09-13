@@ -42,7 +42,9 @@ case "$url" in
   *pyproject.toml) cp "$FAKE_FIXTURES/remote_pyproject.toml" "$out" ;;
   *.tar.gz) cp "$FAKE_FIXTURES/main.tar.gz" "$out" ;;
   *health*)
-    if [ -f "$FAKE_FIXTURES/health_body.txt" ]; then cat "$FAKE_FIXTURES/health_body.txt" > "$out"; fi
+    if [ -f "$FAKE_FIXTURES/health_body.txt" ]; then
+      cat "$FAKE_FIXTURES/health_body.txt" > "$out"
+    fi
     exit "${FAKE_HEALTH_EXIT:-0}" ;;
   *) echo "fake curl: unexpected url $url" >&2; exit 22 ;;
 esac
