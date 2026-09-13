@@ -71,3 +71,17 @@ chemistry = "lipo"
 cells = 1
 capacity_mah = 1000
 default_current_ma = 500
+
+
+# A bare Li-ion cell template (18650/21700/etc). Uncomment and edit to
+# use - kept commented so the shipped example registry still contains
+# exactly one placeholder pack.
+#
+# [[pack]]
+# name = "cell_18650"
+# description = "single 18650 cell, 3000mAh, in a cell holder"
+# chemistry = "liion"
+# cells = 1
+# capacity_mah = 3000
+# default_current_ma = 1000
+# max_current_ma = 1500

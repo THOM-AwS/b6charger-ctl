@@ -564,28 +564,67 @@ There's no GitHub Actions workflow that deploys this anywhere - only
 per-host decision, not something this repo assumes.
 
 [`systemd/charger-pi/`](systemd/charger-pi/) is a worked example for a
-host that can't be reached by a push-based deploy at all: an isolated,
-resource-constrained (armv6l, sub-100MB free RAM) Raspberry Pi on a
-private mesh network with no route from any CI runner, but with proven
-outbound HTTPS access. Instead of a runner living on the mesh
-(not viable there - GitHub's Actions runner doesn't ship for armv6l,
-and there's no RAM to spare for one anyway), [`self_update.sh`](systemd/charger-pi/self_update.sh)
-runs on a timer, compares its deployed version against `main`'s
-`pyproject.toml` on GitHub, and if newer, downloads and extracts
+host that a push-based deploy cannot reach at all: a small single-board
+computer on an isolated network with outbound HTTPS only, too small to
+host a GitHub Actions runner. Instead of a runner,
+[`self_update.sh`](systemd/charger-pi/self_update.sh) runs from a
+systemd timer, compares the deployed version marker against `main`'s
+`pyproject.toml` on GitHub, and if they differ downloads and extracts
 `main.tar.gz` itself - a tarball, not git/pip, since this project has
 zero third-party dependencies (`dependencies = []`) and neither git nor
-pip need to be installed for it to run. It also syncs this directory's
-own `.service`/`.timer` files into `/etc/systemd/system` if they've
-changed, so updating the deployment's own systemd units is just a
-normal commit to this repo too, not a separate manual step.
+pip need to be installed for it to run. It also syncs that directory's
+own `.service`/`.timer` files into `/etc/systemd/system`, so updating
+the deployment's own systemd units is just a normal commit to this
+repo too.
 
-The swap is atomic (build the new `src/` fully in a temp dir, `mv` it
-into place) and keeps one generation of rollback (`src.prev`, removed
-only after the post-update service restart succeeds) - deliberately
-more defensive than a plain `git pull` would be, given this same
-pattern (a stray copy left sitting under the install root, outside
-`src/`) is exactly what caused the 2026-08-03 "stale shadow copy"
-incident documented in `DRY_RUN.md`.
+What the script guarantees, in order:
+
+- **Same-filesystem atomic swap.** The tarball is extracted into a
+  dot-prefixed temp dir *under the install root*, so the final `mv`
+  into `src/` is a rename, not a copy. (A `/tmp` temp dir silently
+  turns into copy-then-delete when `/tmp` is tmpfs.) Nothing is ever
+  left at the install root except `src/`, `packs.toml`,
+  `packs.example.toml` and the version marker - the 2026-08-03 "stale
+  shadow copy" incident in `DRY_RUN.md` is why that rule exists.
+- **Refuses a bad release.** The extracted tree must contain
+  `b6charger/cli.py` and a `pyproject.toml` whose version matches what
+  `main` advertised; a lower version than the one deployed is refused
+  unless `ALLOW_DOWNGRADE=1`.
+- **Host settings stay on the host.** On its first run it captures the
+  live unit's `User=`, `WorkingDirectory=`, `Environment=` and
+  `ExecStart=` into a systemd drop-in
+  (`b6charger-httpd.service.d/10-host.conf`) and never touches that
+  file again. The shipped unit can therefore be generic; your service
+  account, packs path and port are not in the repo.
+- **Verified restart, automatic rollback.** After `systemctl restart`
+  it polls the daemon's `/metrics` (port derived from the live
+  `--port`/`--listen`, or `HEALTH_URL`). If the restart or the health
+  check fails, it restores the previous `src/` *and* the previous unit
+  files, restarts again, and exits non-zero. Only after a healthy
+  restart does it write the version marker and drop `src.prev` - so a
+  broken release is retried next cycle rather than being recorded as
+  "up to date".
+- **Only its own units.** Just the three named unit files are ever
+  copied into `/etc/systemd/system`, and a unified diff of any change
+  goes to the journal.
+
+Configuration is optional and lives outside the repo:
+[`self-update.conf.example`](systemd/charger-pi/self-update.conf.example)
+documents every setting (repo/branch to follow - point it at your fork
+- install root, service name, health URL, timeouts, size cap). Copy it
+to `/etc/default/b6charger-self-update`. `self_update.sh --check`
+prints the local and remote versions without deploying.
+
+Trust model, stated plainly: the updater runs as root and executes
+whatever `main` contains, over TLS to GitHub, with no signature check.
+Anyone who can push to the branch it follows can run code on the host
+within one timer period. If that is not acceptable for your deployment,
+follow a branch or fork you control the merges to, or don't use this
+and deploy by hand.
+
+The script's behaviour is covered by `tests/test_self_update_sh.py`,
+which runs the real script under `sh` against fake `curl` and
+`systemctl` binaries.
 
 If your deployment target can run a normal GitHub Actions runner and
 is network-reachable from one, you don't need any of this - a

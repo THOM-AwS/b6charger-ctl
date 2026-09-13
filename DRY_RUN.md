@@ -434,7 +434,7 @@ implementations, all agreeing where the real fields end.
 ## Cell voltages ARE available while idle - via GET_SYS_INFO, not GET_CHARGE_INFO (2026-08-02)
 
 With the stuck-buffer incident above cleared by a power-cycle, and a
-real 3S pack (`youme5200`, per the private `packs.toml` on charger-pi)
+real 3S pack (a 5200mAh LiPo from the private `packs.toml`)
 connected and idle (not yet charging, `state=2`), `GET_CHARGE_INFO`
 still read all-zero pack telemetry - consistent with everything found
 above, and now directly confirmed with a real, currently-connected
@@ -474,7 +474,7 @@ overcautious: it would refuse every single time, regardless of what
 was actually connected.
 
 **Fix**: both call sites now read `GET_SYS_INFO` instead, which stays
-live while idle (see above). Verified with a real pack (`youme5200`,
+live while idle (see above). Verified with a real pack (the same 3S 5200mAh LiPo,
 3S LiPo) connected and idle: the check now correctly detects 3 real
 cells and lets `start --pack` proceed, where it previously refused
 with "detects 0 real cell(s) connected" every time. Covered by
@@ -496,7 +496,7 @@ moment is convenient to check.
 
 ## Feature: post-start verification, closing the "sent != confirmed" gap (2026-08-03)
 
-Trying `start --pack youme5200` against real hardware (with the
+Trying `start --pack <name>` against real hardware (with the
 `GET_SYS_INFO` fix above already deployed) surfaced a real gap:
 the pre-start check passed on one attempt but the command still
 appeared to not take effect, and on a later attempt the pre-start
