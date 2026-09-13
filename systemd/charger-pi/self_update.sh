@@ -59,6 +59,9 @@ fi
 # Empty = derive from the live service's --port/--listen (127.0.0.1).
 : "${HEALTH_URL:=}"
 : "${HEALTH_TIMEOUT_S:=30}"
+# "1" = a deploy is only healthy if /metrics also reports charger_up 1,
+# i.e. the daemon can actually talk to the charger, not just serve HTTP.
+: "${HEALTH_REQUIRE_CHARGER_UP:=0}"
 : "${CURL_MAX_TIME_S:=60}"
 : "${MAX_TARBALL_BYTES:=20971520}"
 : "${ALLOW_DOWNGRADE:=0}"
@@ -107,13 +110,21 @@ health_url() {
   fi
 }
 
-# wait_healthy URL SECONDS -> 0 once the daemon answers, 1 on timeout
+# wait_healthy URL SECONDS -> 0 once the daemon answers (and, with
+# HEALTH_REQUIRE_CHARGER_UP=1, reports charger_up 1), 1 on timeout
 wait_healthy() {
   url="$1"
   deadline=$(( $(date +%s) + $2 ))
+  body="$tmpdir/health.out"
   while :; do
-    if curl -fsS --max-time 3 -o /dev/null "$url"; then
-      return 0
+    if curl -fsS --max-time 3 -o "$body" "$url"; then
+      if [ "$HEALTH_REQUIRE_CHARGER_UP" != "1" ]; then
+        return 0
+      fi
+      if grep -qE '^charger_up 1(\.0)?$' "$body"; then
+        return 0
+      fi
+      log "health: daemon answered but charger_up is not 1 yet"
     fi
     if [ "$(date +%s)" -ge "$deadline" ]; then
       return 1

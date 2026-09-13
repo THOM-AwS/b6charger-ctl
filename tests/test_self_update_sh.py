@@ -41,7 +41,9 @@ if [ -z "$out" ]; then echo "fake curl: no -o given for $url" >&2; exit 2; fi
 case "$url" in
   *pyproject.toml) cp "$FAKE_FIXTURES/remote_pyproject.toml" "$out" ;;
   *.tar.gz) cp "$FAKE_FIXTURES/main.tar.gz" "$out" ;;
-  *health*) exit "${FAKE_HEALTH_EXIT:-0}" ;;
+  *health*)
+    if [ -f "$FAKE_FIXTURES/health_body.txt" ]; then cat "$FAKE_FIXTURES/health_body.txt" > "$out"; fi
+    exit "${FAKE_HEALTH_EXIT:-0}" ;;
   *) echo "fake curl: unexpected url $url" >&2; exit 22 ;;
 esac
 """
@@ -309,3 +311,29 @@ def test_temp_dir_lives_under_install_root_for_same_filesystem_rename(harness):
     assert result.returncode == 0, result.stderr + result.stdout
     assert str(harness.install) in result.stdout
     assert "/tmp/b6charger-ctl-update" not in result.stdout
+
+
+# --- optional stricter health: the daemon must actually see the charger ---------
+
+
+def test_health_can_require_charger_up(harness):
+    harness.install_local("0.9.0")
+    harness.set_remote("0.9.1")
+    harness.config.write_text(harness.config.read_text() + 'HEALTH_REQUIRE_CHARGER_UP="1"\n')
+    # fake curl serves the health URL body from this file when asked to
+    (harness.fixtures / "health_body.txt").write_text("charger_up 0\n")
+    result = harness.run()
+    assert result.returncode != 0
+    assert "charger_up" in (result.stdout + result.stderr)
+    assert harness.deployed_version() == "# cli 0.9.0"
+    assert harness.marker.read_text().strip() == "0.9.0"
+
+
+def test_health_require_charger_up_passes_when_charger_seen(harness):
+    harness.install_local("0.9.0")
+    harness.set_remote("0.9.1")
+    harness.config.write_text(harness.config.read_text() + 'HEALTH_REQUIRE_CHARGER_UP="1"\n')
+    (harness.fixtures / "health_body.txt").write_text("charger_up 1\n")
+    result = harness.run()
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert harness.deployed_version() == "# cli 0.9.1"

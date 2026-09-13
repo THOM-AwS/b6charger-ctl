@@ -19,6 +19,11 @@
 # explicitly if the daemon binds a specific interface address.
 #HEALTH_URL=""
 #HEALTH_TIMEOUT_S="30"
+# "1" additionally requires /metrics to report charger_up 1 - the daemon
+# must be talking to the charger, not merely serving HTTP. Catches a
+# permissions or device regression a plain HTTP probe would call healthy.
+# Leave "0" if the charger is often unplugged when the timer fires.
+#HEALTH_REQUIRE_CHARGER_UP="0"
 #
 # Network bounds for a small host.
 #CURL_MAX_TIME_S="60"
