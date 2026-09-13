@@ -117,7 +117,9 @@ wait_healthy() {
   deadline=$(( $(date +%s) + $2 ))
   body="$tmpdir/health.out"
   while :; do
-    if curl -fsS --max-time 3 -o "$body" "$url"; then
+    # -s without -S: a refused connection while the daemon is still
+    # starting is expected, not worth a journal line per attempt.
+    if curl -fs --max-time 3 -o "$body" "$url"; then
       if [ "$HEALTH_REQUIRE_CHARGER_UP" != "1" ]; then
         return 0
       fi
